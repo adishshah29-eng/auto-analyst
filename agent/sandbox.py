@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import multiprocessing as mp
+import queue
 import resource
 import traceback
 from contextlib import redirect_stdout
@@ -176,22 +177,33 @@ def run_sandboxed(
         ),
     )
     proc.start()
-    proc.join(timeout)
 
-    if proc.is_alive():
-        proc.terminate()
-        proc.join(2)
+    # Must read from the queue *before* joining, not after: multiprocessing's
+    # Queue writes to its underlying pipe from a background feeder thread in
+    # the child, and a child that put()s a large object (e.g. a captured
+    # DataFrame) cannot exit until that thread finishes writing. If the
+    # pickled payload exceeds the OS pipe buffer (~64KB on Linux) the write
+    # blocks until the parent drains it — so join()-before-get() deadlocks
+    # the parent waiting for an exit that can't happen until the parent
+    # itself reads the queue. (Confirmed live: a `df` capture on a ~6k-row
+    # dataframe pickles to ~560KB and reliably hung the old join-first
+    # ordering for the full timeout on every attempt, despite the child
+    # finishing its actual work in under 30ms — see README "Key Learnings".)
+    try:
+        raw = result_queue.get(timeout=timeout)
+    except queue.Empty:
         if proc.is_alive():
-            proc.kill()
-            proc.join()
-        return SandboxResult(
-            success=False,
-            error=f"TimeoutError: execution exceeded {timeout}s and was terminated.",
-        )
-
-    if result_queue.empty():
-        # Process died without producing a result (e.g. OOM-killed by the
-        # memory limit, or a segfault in a C extension).
+            proc.terminate()
+            proc.join(2)
+            if proc.is_alive():
+                proc.kill()
+                proc.join()
+            return SandboxResult(
+                success=False,
+                error=f"TimeoutError: execution exceeded {timeout}s and was terminated.",
+            )
+        # Process exited without ever putting a result (e.g. OOM-killed by
+        # the memory limit, or a segfault in a C extension).
         exit_code = proc.exitcode
         return SandboxResult(
             success=False,
@@ -201,7 +213,11 @@ def run_sandboxed(
             ),
         )
 
-    raw = result_queue.get()
+    proc.join(5)  # queue is drained, so the child's feeder thread can finish; this should be near-instant
+    if proc.is_alive():
+        proc.terminate()
+        proc.join()
+
     return SandboxResult(
         success=raw["success"],
         stdout=raw["stdout"],

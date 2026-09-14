@@ -16,7 +16,7 @@ from typing import Any
 import pandas as pd
 
 from agent.llm import CostTracker, call_llm, extract_code
-from agent.sandbox import SandboxResult, run_sandboxed
+from agent.sandbox import DEFAULT_TIMEOUT_SECONDS, SandboxResult, run_sandboxed
 from agent.state import AnalysisState, record_code_step
 
 SANDBOX_SYSTEM_PREAMBLE = """You are a data analysis agent that writes short, correct pandas/numpy/matplotlib snippets.
@@ -62,6 +62,24 @@ def _run_with_retry(
     attempts = 0
     while not result.success and attempts < max_retries:
         attempts += 1
+
+        if result.error and result.error.startswith("TimeoutError"):
+            # A timeout on a short pandas snippet is a sandbox/infra stall
+            # (cold process spawn, host contention), not a logic bug — the
+            # model can't fix it by rewriting already-correct code, and
+            # spending an LLM call + rewrite on it burns the one retry on
+            # nothing. Re-run the identical code with more headroom first;
+            # only fall through to an LLM-corrected rewrite for an actual
+            # traceback. (Observed live: a trivial fillna() on ~6k rows
+            # timed out once during eval and succeeded in <1s on every
+            # other attempt — see README "Key Learnings".)
+            result = run_sandboxed(
+                code, df, extra_context=extra_context, capture_vars=capture_vars,
+                timeout=DEFAULT_TIMEOUT_SECONDS * 2, **kwargs,
+            )
+            record_code_step(state, stage, code, result.success, result.error, retried=True)
+            continue
+
         correction_prompt = (
             f"{user_prompt}\n\n"
             "Your previous attempt raised an error when executed. Fix the code.\n\n"
