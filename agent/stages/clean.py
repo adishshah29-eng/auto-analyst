@@ -1,0 +1,55 @@
+"""Stage 2: Clean. Agent proposes and executes a cleaning plan (nulls,
+dtype mismatches, duplicates) based only on the schema profile, then
+reports what it did in plain English for the UI / audit trail."""
+
+from __future__ import annotations
+
+import json
+
+import pandas as pd
+
+from agent.llm import CostTracker
+from agent.state import AnalysisState
+from agent.stages.common import SANDBOX_SYSTEM_PREAMBLE, _run_with_retry
+
+_TASK = """Given the dataset profile below, write pandas code that cleans `df`:
+- Handle missing values sensibly per column (impute, or drop rows/cols only when null_pct is very high).
+- Fix obvious dtype mismatches (e.g. a numeric column stored as text).
+- Drop exact duplicate rows if any exist.
+- Do NOT drop or rename columns unless clearly justified by the profile (e.g. a column that is entirely null).
+
+Reassign the cleaned result to `df`. Also build a Python list of short strings named
+`cleaning_actions` describing each action you took (e.g. "Imputed 12 missing values in 'age' with median").
+If no cleaning was needed, set `cleaning_actions = []` and leave `df` unchanged.
+
+Dataset profile (schema + aggregated stats only, no raw rows):
+{profile_json}
+"""
+
+
+def run(state: AnalysisState, df: pd.DataFrame, tracker: CostTracker, model: str) -> pd.DataFrame:
+    profile_json = json.dumps(state["dataset_schema"], default=str)[:6000]
+    user_prompt = _TASK.format(profile_json=profile_json)
+
+    result, _ = _run_with_retry(
+        system=SANDBOX_SYSTEM_PREAMBLE,
+        user_prompt=user_prompt,
+        df=df,
+        capture_vars=["df", "cleaning_actions"],
+        stage="clean",
+        state=state,
+        tracker=tracker,
+        model=model,
+    )
+
+    if not result.success:
+        state["cleaning_actions_taken"].append(
+            f"Cleaning step failed after retry, proceeding with uncleaned data: {result.error.splitlines()[-1] if result.error else 'unknown error'}"
+        )
+        return df
+
+    cleaned_df = result.output_vars.get("df", df)
+    actions = result.output_vars.get("cleaning_actions", [])
+    if isinstance(actions, list):
+        state["cleaning_actions_taken"].extend(str(a) for a in actions)
+    return cleaned_df if isinstance(cleaned_df, pd.DataFrame) else df
