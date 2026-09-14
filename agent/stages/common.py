@@ -16,7 +16,7 @@ from typing import Any
 import pandas as pd
 
 from agent.llm import CostTracker, call_llm, extract_code
-from agent.sandbox import DEFAULT_MEMORY_LIMIT_MB, DEFAULT_TIMEOUT_SECONDS, SandboxResult, run_sandboxed
+from agent.sandbox import DEFAULT_TIMEOUT_SECONDS, SandboxResult, run_sandboxed
 from agent.state import AnalysisState, record_code_step
 
 SANDBOX_SYSTEM_PREAMBLE = """You are a data analysis agent that writes short, correct pandas/numpy/matplotlib snippets.
@@ -82,17 +82,21 @@ def _run_with_retry(
             continue
 
         if "MemoryError" in err or err.startswith("Sandbox process exited"):
-            # Same idea as the timeout branch above: on a memory-constrained
-            # host (e.g. a free-tier deploy sharing ~1GB across the whole
-            # app), the sandboxed child can fail from resource pressure
-            # before the code itself ever runs incorrectly — rewriting the
-            # snippet doesn't fix that. Retry the identical code with a
-            # higher memory ceiling first. (Observed live: identical pandas
-            # code that ran fine in isolated local testing failed this way
-            # on a deployed instance — see README "Key Learnings".)
+            # Same idea as the timeout branch: on a memory-constrained host
+            # (e.g. a free-tier deploy sharing ~1GB across the whole app),
+            # the sandboxed child can fail from resource pressure before
+            # the code itself ever runs incorrectly — rewriting the snippet
+            # doesn't fix that. Retry the identical code with RLIMIT_AS
+            # disabled entirely (memory_limit_mb=0), letting the container's
+            # own OOM protection be the real cap. RLIMIT_AS proved to be a
+            # bad proxy for real memory usage on container-limited hosts:
+            # it counts memory-mapped shared libs and thread-stack address
+            # space that isn't really "used", and once tight, even the
+            # child's error handler can't run — the retry with a doubled
+            # cap couldn't help there. See README "Key Learnings".
             result = run_sandboxed(
                 code, df, extra_context=extra_context, capture_vars=capture_vars,
-                memory_limit_mb=DEFAULT_MEMORY_LIMIT_MB * 2, **kwargs,
+                memory_limit_mb=0, **kwargs,
             )
             record_code_step(state, stage, code, result.success, result.error, retried=True)
             continue

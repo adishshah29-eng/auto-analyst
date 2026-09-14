@@ -29,12 +29,16 @@ import pandas as pd
 matplotlib.use("Agg")  # headless: never try to open a display
 import matplotlib.pyplot as plt  # noqa: E402
 
-# Overridable via env vars so a memory-constrained host (e.g. Streamlit
-# Community Cloud's free tier, ~1GB total for the whole app) can lower
-# these without a code change — the local/default values assume a normal
-# dev machine.
+# Overridable via env vars so hosts with unusual constraints can tune
+# without a code change. Defaults now assume a container-limited deploy
+# (Streamlit Cloud, Cloud Run, etc.): SANDBOX_MEMORY_LIMIT_MB=0 disables
+# the RLIMIT_AS-based cap and lets the container's own memory limits do
+# their job — see _set_resource_limits() for why RLIMIT_AS was making
+# things strictly worse there. On a local dev machine with no container
+# cap, set a real number (e.g. 1024) if you want a per-snippet safety
+# net; the container backstop isn't there.
 DEFAULT_TIMEOUT_SECONDS = int(os.environ.get("SANDBOX_TIMEOUT_SECONDS", 15))
-DEFAULT_MEMORY_LIMIT_MB = int(os.environ.get("SANDBOX_MEMORY_LIMIT_MB", 1024))
+DEFAULT_MEMORY_LIMIT_MB = int(os.environ.get("SANDBOX_MEMORY_LIMIT_MB", 0))
 
 # Deliberately small: enough for pandas/numpy/matplotlib code to run,
 # not enough to import arbitrary modules, touch the filesystem outside
@@ -61,7 +65,25 @@ class SandboxResult:
 
 
 def _set_resource_limits(memory_limit_mb: int) -> None:
-    """Best-effort memory cap for the child process (Linux only)."""
+    """Best-effort memory cap for the child process (Linux only).
+
+    Pass 0 to skip the cap entirely — the right choice on container-limited
+    hosts (Streamlit Cloud, Cloud Run, most PaaS) where the container
+    already enforces total memory. RLIMIT_AS is a poor proxy for actual
+    memory usage: it counts memory-mapped shared libraries (pandas alone
+    mmaps hundreds of MB of native code), thread stacks (~8MB each in
+    virtual address space), and other things the process isn't really
+    "using". A limit that looks generous on a dev machine (1GB) can starve
+    the pandas/numpy/matplotlib import in the child before any user code
+    runs — and worse, once address space is that tight, `Queue.put()`
+    itself fails (it needs to spawn a background feeder thread whose stack
+    doesn't fit), so the error handler that would report the MemoryError
+    can't even run. That leaves the parent seeing an opaque "process
+    exited" with zero diagnostic content — the exact failure that kept
+    recurring on the deployed free-tier app.
+    """
+    if memory_limit_mb <= 0:
+        return
     try:
         limit_bytes = memory_limit_mb * 1024 * 1024
         resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
@@ -206,29 +228,51 @@ def run_sandboxed(
     # dataframe pickles to ~560KB and reliably hung the old join-first
     # ordering for the full timeout on every attempt, despite the child
     # finishing its actual work in under 30ms — see README "Key Learnings".)
-    try:
-        raw = result_queue.get(timeout=timeout)
-    except queue.Empty:
-        if proc.is_alive():
-            proc.terminate()
-            proc.join(2)
-            if proc.is_alive():
-                proc.kill()
-                proc.join()
-            return SandboxResult(
-                success=False,
-                error=f"TimeoutError: execution exceeded {timeout}s and was terminated.",
-            )
-        # Process exited without ever putting a result (e.g. OOM-killed by
-        # the memory limit, or a segfault in a C extension).
-        exit_code = proc.exitcode
-        return SandboxResult(
-            success=False,
-            error=(
-                f"Sandbox process exited (code {exit_code}) without returning a "
-                "result — likely hit the memory limit or crashed."
-            ),
-        )
+    #
+    # Poll rather than a straight blocking get: on a silent crash (OOM
+    # kill, or a MemoryError so severe the child's own exception handler
+    # can't run), a bare `queue.get(timeout=15)` waits the FULL 15s before
+    # noticing the child died in 100ms, wasting the parent's time and
+    # producing pipelines that take ~45s to fail three stages. Poll every
+    # 200ms so we notice a dead child roughly one poll interval after it
+    # dies, whether it produced output or not.
+    import time as _time
+    poll_interval = 0.2
+    deadline = _time.monotonic() + timeout
+    raw = None
+    while True:
+        try:
+            raw = result_queue.get(timeout=poll_interval)
+            break
+        except queue.Empty:
+            if not proc.is_alive():
+                # Give the queue one last poll: the child may have put a
+                # result and exited in the same interval.
+                try:
+                    raw = result_queue.get_nowait()
+                    break
+                except queue.Empty:
+                    exit_code = proc.exitcode
+                    return SandboxResult(
+                        success=False,
+                        error=(
+                            f"Sandbox process exited (code {exit_code}) without returning a "
+                            "result — likely OOM-killed by the host container or crashed "
+                            "in a C extension. If this is a deployed instance on a "
+                            "memory-constrained host, unset SANDBOX_MEMORY_LIMIT_MB (or set "
+                            "it to 0) so RLIMIT_AS isn't fighting the container's own cap."
+                        ),
+                    )
+            if _time.monotonic() >= deadline:
+                proc.terminate()
+                proc.join(2)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join()
+                return SandboxResult(
+                    success=False,
+                    error=f"TimeoutError: execution exceeded {timeout}s and was terminated.",
+                )
 
     proc.join(5)  # queue is drained, so the child's feeder thread can finish; this should be near-instant
     if proc.is_alive():
