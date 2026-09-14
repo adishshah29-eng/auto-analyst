@@ -3,8 +3,9 @@ reports the metrics from README "Evaluation Plan": code execution success
 rate (first try and after self-correction), a chart-appropriateness proxy
 score, and latency/cost per dataset.
 
-Requires ANTHROPIC_API_KEY to be set (this drives the real agent, not a
-mock) — see .env.example. Run with:  python eval/run_eval.py
+Requires ANTHROPIC_API_KEY or GOOGLE_API_KEY to be set (this drives the
+real agent, not a mock) — see .env.example. Run with:
+python eval/run_eval.py
 """
 
 from __future__ import annotations
@@ -18,7 +19,11 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent.llm import DEFAULT_MODEL  # noqa: E402
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv()
+
+from agent.llm import DEFAULT_MODEL, infer_provider  # noqa: E402
 from agent.loop import run_analysis  # noqa: E402
 from agent.state import AnalysisState  # noqa: E402
 
@@ -151,10 +156,13 @@ def main() -> None:
     parser.add_argument("--out", default=os.path.join(os.path.dirname(__file__), "results.json"))
     args = parser.parse_args()
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    provider = infer_provider(args.model)
+    key_env_var = "GOOGLE_API_KEY" if provider == "google" else "ANTHROPIC_API_KEY"
+    if not os.environ.get(key_env_var):
         print(
-            "ANTHROPIC_API_KEY is not set — this eval drives the real agent against real "
-            "datasets and needs a key. Copy .env.example to .env and set it.",
+            f"{key_env_var} is not set for provider '{provider}' (model '{args.model}') — this "
+            "eval drives the real agent against real datasets and needs a key. Copy .env.example "
+            "to .env and set it.",
             file=sys.stderr,
         )
         sys.exit(1)

@@ -2,5 +2,6 @@ pandas>=2.2
 numpy>=1.26
 matplotlib>=3.8
 anthropic>=0.40
+google-genai>=1.0
 streamlit>=1.38
 python-dotenv>=1.0

@@ -43,13 +43,17 @@ This is a defense against the specific failure mode of a value flowing into the 
 
 ## Cost Tracking
 
-`agent/llm.py`'s `CostTracker` accumulates input/output tokens and an estimated USD cost after every call, using a small per-model pricing table (override via `ANALYSIS_MODEL_PRICE_IN`/`_OUT` env vars — list prices change, verify at [claude.com/pricing](https://claude.com/pricing)). Pass a `budget_usd` ceiling to `run_analysis()` (the Streamlit sidebar exposes this) and the run raises `BudgetExceededError` and stops cleanly, with whatever was produced so far still returned, rather than continuing to spend unattended.
+`agent/llm.py`'s `CostTracker` accumulates input/output tokens and an estimated USD cost after every call, using a small per-model pricing table (override via `ANALYSIS_MODEL_PRICE_IN`/`_OUT` env vars — list prices change, verify at [claude.com/pricing](https://claude.com/pricing) or [ai.google.dev/pricing](https://ai.google.dev/pricing)). Pass a `budget_usd` ceiling to `run_analysis()` (the Streamlit sidebar exposes this) and the run raises `BudgetExceededError` and stops cleanly, with whatever was produced so far still returned, rather than continuing to spend unattended.
+
+## Model Providers
+
+Two providers work behind the same `call_llm()` interface (`agent/llm.py`) — Anthropic (Claude) and Google (Gemini, including the free AI Studio tier). The provider is inferred from the model name (anything starting with `gemini` routes to Google, everything else to Anthropic), or forced with `LLM_PROVIDER`. Set `ANALYSIS_MODEL` and the matching API key (`ANTHROPIC_API_KEY` or `GOOGLE_API_KEY`) in `.env` — see `.env.example`. On the Google free tier, cost estimates default to $0 (that tier is rate-limited, not billed) rather than a placeholder price; set `ANALYSIS_MODEL_PRICE_IN`/`_OUT` if you're on paid Gemini billing and want real numbers.
 
 ## Results
 
 Sandbox isolation (namespace confinement, copy-on-inject, timeout, traceback capture, chart export) and full pipeline wiring (stage sequencing, self-correction retry, state accumulation, chart-dir threading) are covered by tests run during development — 7/7 sandbox isolation checks pass, and all three `eval/test_datasets/` schemas run end-to-end without a crash, including a deliberate double-failure path that degrades gracefully instead of raising.
 
-The table below is what `eval/run_eval.py` reports when run against a live model — it needs an `ANTHROPIC_API_KEY` (this repo doesn't ship one), so these are placeholders until someone runs it:
+The table below is what `eval/run_eval.py` reports when run against a live model — it needs an `ANTHROPIC_API_KEY` or `GOOGLE_API_KEY` (this repo doesn't ship one), so these are placeholders until someone runs it:
 
 | Metric | Value |
 |---|---|
@@ -71,7 +75,7 @@ The riskiest part of this design isn't the LLM calling `exec()` — it's the plu
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env   # then add your ANTHROPIC_API_KEY
+cp .env.example .env   # then add ANTHROPIC_API_KEY or GOOGLE_API_KEY (free: https://aistudio.google.com/apikey)
 
 # Frontend
 streamlit run app.py

@@ -11,7 +11,7 @@ import time
 import streamlit as st
 from dotenv import load_dotenv
 
-from agent.llm import DEFAULT_MODEL
+from agent.llm import DEFAULT_MODEL, infer_provider
 from agent.loop import run_analysis
 
 load_dotenv()
@@ -43,8 +43,10 @@ with st.sidebar:
         "the schema and aggregated statistics are. Generated code runs in a restricted, "
         "timeout- and memory-limited sandbox against a *copy* of your data."
     )
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        st.warning("ANTHROPIC_API_KEY is not set. Copy .env.example to .env and add your key.")
+    provider = infer_provider(model)
+    key_env_var = "GOOGLE_API_KEY" if provider == "google" else "ANTHROPIC_API_KEY"
+    if not os.environ.get(key_env_var):
+        st.warning(f"{key_env_var} is not set for provider '{provider}'. Copy .env.example to .env and add your key.")
 
 uploaded = st.file_uploader("Upload a dataset", type=["csv", "json", "xlsx", "xls"])
 
