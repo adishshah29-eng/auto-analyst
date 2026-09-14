@@ -5,11 +5,27 @@ insight summary."""
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import time
 
 import streamlit as st
 from dotenv import load_dotenv
+
+
+def _running_commit_short() -> str:
+    """Best-effort git SHA of the code the server is actually running.
+    Fails silently to 'unknown' when git isn't available or when the deploy
+    doesn't ship .git — the value is diagnostic, never critical."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        ).decode().strip()
+    except Exception:
+        return "unknown"
 
 from agent.llm import DEFAULT_MODEL, infer_provider
 from agent.loop import run_analysis
@@ -58,6 +74,7 @@ with st.sidebar:
     key_env_var = "GOOGLE_API_KEY" if provider == "google" else "ANTHROPIC_API_KEY"
     if not os.environ.get(key_env_var):
         st.warning(f"{key_env_var} is not set for provider '{provider}'. Copy .env.example to .env and add your key.")
+    st.caption(f"Running commit: `{_running_commit_short()}` — compare with the latest on GitHub to check whether the deploy has picked up your last push.")
 
 uploaded = st.file_uploader("Upload a dataset", type=["csv", "json", "xlsx", "xls"])
 
@@ -70,7 +87,16 @@ if uploaded is not None:
 
         chart_dir = tempfile.mkdtemp(prefix="autoanalyst_charts_")
 
-        progress_area = st.container()
+        # st.empty() (not st.container()) — an empty slot whose content is
+        # REPLACED on each render call. A container's .markdown() APPENDS a
+        # new markdown element every time, so after N progress callbacks
+        # the visible list contains N cumulative renderings of the growing
+        # log (the first with 1 line, the second with 2, up to N with N
+        # lines) stacked on top of each other. Observed live on a deployed
+        # mobile view: the log filled the whole screen with duplicated
+        # "1. Load & Profile — Loaded..." entries even though only one
+        # analysis run had been kicked off.
+        progress_area = st.empty()
         progress_lines: list[str] = []
 
         def on_progress(stage: str, msg: str) -> None:
