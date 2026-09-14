@@ -16,6 +16,17 @@ from agent.loop import run_analysis
 
 load_dotenv()
 
+# Streamlit Community Cloud's secrets UI populates st.secrets, not
+# os.environ/.env — mirror any secrets it has into os.environ so the rest
+# of the app (agent/llm.py reads plain env vars) works unchanged locally
+# and on Cloud. A no-op wherever secrets.toml doesn't exist (e.g. local
+# dev without one), since st.secrets then just has nothing to iterate.
+try:
+    for _key, _value in st.secrets.items():
+        os.environ.setdefault(_key, str(_value))
+except FileNotFoundError:
+    pass
+
 st.set_page_config(page_title="Autonomous Data Analysis Agent", layout="wide")
 
 STAGE_LABELS = {

@@ -97,6 +97,22 @@ python eval/generate_datasets.py
 python eval/run_eval.py --budget 1.0
 ```
 
+## Deploy (Streamlit Community Cloud)
+
+1. Push this repo to GitHub (already done if you're reading this from there).
+2. Go to [share.streamlit.io](https://share.streamlit.io) → **New app** → pick this repo, the branch to deploy, and `app.py` as the entry point.
+3. Under **Advanced settings → Secrets**, paste (TOML format):
+   ```toml
+   GOOGLE_API_KEY = "..."
+   # or ANTHROPIC_API_KEY = "..."
+   ANALYSIS_MODEL = "gemini-flash-lite-latest"
+   SANDBOX_MEMORY_LIMIT_MB = "700"
+   ```
+   `app.py` mirrors `st.secrets` into `os.environ` on startup, so this reaches `agent/llm.py` and `agent/sandbox.py` exactly like a local `.env` does — no code changes needed between local and Cloud.
+4. Deploy. First build installs `requirements.txt` (a couple of minutes); after that it's live at `<your-app>.streamlit.app` and redeploys automatically on every push to the branch you picked.
+
+**Why `SANDBOX_MEMORY_LIMIT_MB=700`, not the 1024 default:** Community Cloud's free tier gives the whole app ~1GB RAM total, shared between Streamlit itself and the sandboxed child process the agent spawns per code snippet. Tested empirically against the largest eval dataset (`retail_sales.csv`, ~6k rows): below ~600MB, even a trivial cleaning snippet fails outright just from the pandas/numpy/matplotlib import + DataFrame copy overhead in the child — there's no comfortable margin on this tier, only a working one. `.streamlit/config.toml` also caps uploads at 25MB so one large file can't blow the budget before the agent even starts. If you hit memory-related failures on real datasets, that's the first knob to check (raise it if you move to a paid Cloud tier with more RAM; you can't lower it much further and still run).
+
 ## Folder Structure
 
 ```

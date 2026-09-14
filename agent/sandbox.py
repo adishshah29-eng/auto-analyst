@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import multiprocessing as mp
+import os
 import queue
 import resource
 import traceback
@@ -28,8 +29,12 @@ import pandas as pd
 matplotlib.use("Agg")  # headless: never try to open a display
 import matplotlib.pyplot as plt  # noqa: E402
 
-DEFAULT_TIMEOUT_SECONDS = 15
-DEFAULT_MEMORY_LIMIT_MB = 1024
+# Overridable via env vars so a memory-constrained host (e.g. Streamlit
+# Community Cloud's free tier, ~1GB total for the whole app) can lower
+# these without a code change — the local/default values assume a normal
+# dev machine.
+DEFAULT_TIMEOUT_SECONDS = int(os.environ.get("SANDBOX_TIMEOUT_SECONDS", 15))
+DEFAULT_MEMORY_LIMIT_MB = int(os.environ.get("SANDBOX_MEMORY_LIMIT_MB", 1024))
 
 # Deliberately small: enough for pandas/numpy/matplotlib code to run,
 # not enough to import arbitrary modules, touch the filesystem outside

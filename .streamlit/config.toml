@@ -1,0 +1,7 @@
+# Streamlit Community Cloud's free tier gives the whole app ~1GB RAM
+# shared between Streamlit itself, pandas/matplotlib, and the sandboxed
+# child process (which alone needs ~600-700MB just to run a trivial
+# snippet — see SANDBOX_MEMORY_LIMIT_MB in .env.example). Cap upload size
+# so one large file can't blow that budget before the agent even starts.
+[server]
+maxUploadSize = 25
