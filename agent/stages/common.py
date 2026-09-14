@@ -16,7 +16,7 @@ from typing import Any
 import pandas as pd
 
 from agent.llm import CostTracker, call_llm, extract_code
-from agent.sandbox import DEFAULT_TIMEOUT_SECONDS, SandboxResult, run_sandboxed
+from agent.sandbox import DEFAULT_MEMORY_LIMIT_MB, DEFAULT_TIMEOUT_SECONDS, SandboxResult, run_sandboxed
 from agent.state import AnalysisState, record_code_step
 
 SANDBOX_SYSTEM_PREAMBLE = """You are a data analysis agent that writes short, correct pandas/numpy/matplotlib snippets.
@@ -63,7 +63,8 @@ def _run_with_retry(
     while not result.success and attempts < max_retries:
         attempts += 1
 
-        if result.error and result.error.startswith("TimeoutError"):
+        err = result.error or ""
+        if err.startswith("TimeoutError"):
             # A timeout on a short pandas snippet is a sandbox/infra stall
             # (cold process spawn, host contention), not a logic bug — the
             # model can't fix it by rewriting already-correct code, and
@@ -76,6 +77,22 @@ def _run_with_retry(
             result = run_sandboxed(
                 code, df, extra_context=extra_context, capture_vars=capture_vars,
                 timeout=DEFAULT_TIMEOUT_SECONDS * 2, **kwargs,
+            )
+            record_code_step(state, stage, code, result.success, result.error, retried=True)
+            continue
+
+        if "MemoryError" in err or err.startswith("Sandbox process exited"):
+            # Same idea as the timeout branch above: on a memory-constrained
+            # host (e.g. a free-tier deploy sharing ~1GB across the whole
+            # app), the sandboxed child can fail from resource pressure
+            # before the code itself ever runs incorrectly — rewriting the
+            # snippet doesn't fix that. Retry the identical code with a
+            # higher memory ceiling first. (Observed live: identical pandas
+            # code that ran fine in isolated local testing failed this way
+            # on a deployed instance — see README "Key Learnings".)
+            result = run_sandboxed(
+                code, df, extra_context=extra_context, capture_vars=capture_vars,
+                memory_limit_mb=DEFAULT_MEMORY_LIMIT_MB * 2, **kwargs,
             )
             record_code_step(state, stage, code, result.success, result.error, retried=True)
             continue

@@ -81,24 +81,36 @@ def _worker(
     memory_limit_mb: int,
     result_queue: "mp.Queue",
 ) -> None:
-    _set_resource_limits(memory_limit_mb)
-
-    import pickle
-
-    df = pickle.loads(df_bytes)
-
-    namespace: dict[str, Any] = {
-        "__builtins__": _SAFE_BUILTINS,
-        "pd": pd,
-        "np": np,
-        "plt": plt,
-        "df": df.copy(deep=True),  # copy-on-inject: generated code can never mutate the caller's df
-    }
-    namespace.update(extra_context)
-
+    # Everything below — including setting the resource limit, unpickling
+    # the input df, and building the namespace — must be inside this
+    # try/except, not just the exec() call. An uncaught exception anywhere
+    # in a multiprocessing.Process target (e.g. a MemoryError from
+    # pickle.loads() under a tight RLIMIT_AS on a memory-constrained host)
+    # crashes the child silently: Python prints a traceback to the child's
+    # own stderr and exits with code 1, but nothing is ever put on
+    # result_queue, so the parent just sees "process exited without a
+    # result" with no diagnostic content. That's the failure mode this
+    # guards against — observed live on a free-tier deployment where the
+    # host's actual available memory was tighter than local testing showed
+    # (see README "Key Learnings").
     stdout_buf = io.StringIO()
     chart_paths: list[str] = []
     try:
+        _set_resource_limits(memory_limit_mb)
+
+        import pickle
+
+        df = pickle.loads(df_bytes)
+
+        namespace: dict[str, Any] = {
+            "__builtins__": _SAFE_BUILTINS,
+            "pd": pd,
+            "np": np,
+            "plt": plt,
+            "df": df.copy(deep=True),  # copy-on-inject: generated code can never mutate the caller's df
+        }
+        namespace.update(extra_context)
+
         with redirect_stdout(stdout_buf):
             exec(code, namespace)  # noqa: S102 - this is the sandbox's whole job
 
