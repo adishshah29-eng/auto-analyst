@@ -5,3 +5,5 @@ anthropic>=0.40
 google-genai>=1.0
 streamlit>=1.38
 python-dotenv>=1.0
+mcp[cli]>=1.0,<2
+pytest>=7.0

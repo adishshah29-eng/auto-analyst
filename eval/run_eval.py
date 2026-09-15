@@ -100,11 +100,11 @@ def chart_appropriateness_score(state: AnalysisState) -> dict:
     }
 
 
-def run_one(path: str, model: str, budget: float | None) -> dict:
+def run_one(path: str, model: str, budget: float | None, judge_model: str | None) -> dict:
     name = os.path.basename(path)
     print(f"\n=== {name} ===")
     start = time.monotonic()
-    result = run_analysis(dataset_path=path, dataset_name=name, model=model, budget_usd=budget)
+    result = run_analysis(dataset_path=path, dataset_name=name, model=model, budget_usd=budget, judge_model=judge_model)
     elapsed = time.monotonic() - start
     state = result.state
 
@@ -121,6 +121,15 @@ def run_one(path: str, model: str, budget: float | None) -> dict:
         "n_cleaning_actions": len(state["cleaning_actions_taken"]),
         "execution": execution_success_rates(state),
         "chart_appropriateness": chart_appropriateness_score(state),
+        # LLM-as-judge: agent/agents/critic.py's review_narrative(), the
+        # same function that scores the narrative live in the Streamlit UI
+        # — reused verbatim here so this number and that badge mean the
+        # same thing. Self-judging by default (same model throughout);
+        # pass --judge-model for an independent judge, which is more
+        # trustworthy evidence (a model is more likely to rate its own
+        # confident-sounding-but-wrong output as fine).
+        "insight_relevance": state["narrative_review"],
+        "critic_findings_review": state["critic_review"],
         "stopped_early": result.stopped_early,
     }
     print(json.dumps(report, indent=2))
@@ -129,17 +138,20 @@ def run_one(path: str, model: str, budget: float | None) -> dict:
 
 def print_summary_table(reports: list[dict]) -> None:
     print("\n\n## Results\n")
-    print("| Dataset | Rows x Cols | First-try success | After retry | Charts | Appropriateness | Latency | Cost |")
-    print("|---|---|---|---|---|---|---|---|")
+    print("| Dataset | Rows x Cols | First-try success | After retry | Charts | Appropriateness | Grounded | Non-obvious | Latency | Cost |")
+    print("|---|---|---|---|---|---|---|---|---|---|")
     for r in reports:
         exe = r["execution"]
         chart = r["chart_appropriateness"]
+        judge = r["insight_relevance"] or {}
         first = f"{exe['first_try_success_rate']:.0%}" if exe["first_try_success_rate"] is not None else "n/a"
         final = f"{exe['final_success_rate_after_retry']:.0%}" if exe["final_success_rate_after_retry"] is not None else "n/a"
         score = f"{chart['score']:.0%}" if chart["score"] is not None else "n/a"
+        grounded = f"{judge.get('grounded_score')}/5" if judge.get("grounded_score") is not None else "n/a"
+        non_obvious = f"{judge.get('non_obvious_score')}/5" if judge.get("non_obvious_score") is not None else "n/a"
         print(
             f"| {r['dataset']} | {r['rows']}x{r['cols']} | {first} | {final} | "
-            f"{r['n_charts']} | {score} | {r['latency_s']}s | ${r['cost_usd']} |"
+            f"{r['n_charts']} | {score} | {grounded} | {non_obvious} | {r['latency_s']}s | ${r['cost_usd']} |"
         )
 
     n = len(reports)
@@ -152,6 +164,12 @@ def print_summary_table(reports: list[dict]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--judge-model",
+        default=None,
+        help="model for the LLM-as-judge narrative scoring; defaults to --model (self-judging) "
+        "if omitted — pass a different, stronger model for more trustworthy insight-relevance numbers",
+    )
     parser.add_argument("--budget", type=float, default=1.0, help="per-dataset budget ceiling, USD")
     parser.add_argument("--out", default=os.path.join(os.path.dirname(__file__), "results.json"))
     args = parser.parse_args()
@@ -172,7 +190,7 @@ def main() -> None:
         print(f"No datasets found in {TEST_DATASET_DIR}. Run eval/generate_datasets.py first.")
         sys.exit(1)
 
-    reports = [run_one(p, args.model, args.budget) for p in paths]
+    reports = [run_one(p, args.model, args.budget, args.judge_model) for p in paths]
     print_summary_table(reports)
 
     with open(args.out, "w") as f:

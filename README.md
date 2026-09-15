@@ -1,28 +1,41 @@
 # Autonomous Data Analysis Agent
 
-Upload any CSV you've never shown it before, and it writes and executes real pandas/matplotlib code — in a sandbox, with self-correction on errors — to clean it, find what's actually interesting in it, chart that, and hand back a plain-English summary.
+Upload any CSV you've never shown it before, and four agents — **Planner, Executor, Critic, Synthesizer** — write and execute real pandas/matplotlib code in a sandbox to clean it, find what's actually interesting in it, chart that, and hand back a plain-English summary, with a human review gate before any code runs.
 
 ## Demo
 
-Run `streamlit run app.py`, upload one of the datasets in `eval/test_datasets/` (a Titanic-like passenger set, a retail sales log, a CRM leads/deals export — three different shapes, same pipeline, no per-dataset code), and watch the five stages run live in the sidebar log, with charts and the summary rendered below.
+Run `streamlit run app.py`, upload one of the datasets in `eval/test_datasets/` (a Titanic-like passenger set, a retail sales log, a CRM leads/deals export — three different shapes, same pipeline, no per-dataset code). The Planner proposes a plan first — review or edit the cleaning steps, then approve to let Executor → Critic → Synthesizer run, with charts and the summary rendered below alongside the Critic's judge score. Or skip the browser and call it directly via MCP — see "MCP Server" below.
 
 ## Why CodeAct (not fixed tools)
 
 A beginner version of this hardcodes `load_csv()` / `make_bar_chart()` style tools, and breaks the moment a dataset doesn't match the assumptions baked into them — a column that isn't named what the tool expected, a numeric column that's actually a category, a schema the author never tested against. This agent instead treats **code execution as the only tool**: at each analysis stage it writes a short pandas/matplotlib snippet against the dataframe it actually has, runs it, and reacts to what comes back (a result or a traceback). That's the same THINK → ACT → OBSERVE loop as any ReAct agent, with "run this Python" standing in for a fixed function call — so it generalizes to whatever shape of data shows up, instead of only the one shape it was tested against.
 
-## Pipeline
+## Pipeline: four agents, not one
 
 ```
-Load & Profile → Clean → Explore → Chart → Synthesize
+Planner → Executor (Clean) → Executor (Explore) → Critic (findings) → Executor (Chart) → Synthesizer → Critic (narrative)
+              ↑
+     [human review gate]
 ```
 
-1. **Load & Profile** (`agent/stages/load_profile.py`) — reads the file and profiles it by dtype: shape, null counts, cardinality, numeric stats, top categorical values, inferred datetime columns. This step is deliberately *not* LLM-generated — profiling by dtype is mechanical, has no judgment calls, and running our own trusted code here (rather than generated code) means one less place for things to go wrong before the agent has any context to reason about.
-2. **Clean** (`agent/stages/clean.py`) — the agent reads the profile and writes code to handle nulls, dtype mismatches, and duplicates, reporting what it did as plain-English actions.
-3. **Exploratory Analysis** (`agent/stages/explore.py`) — the agent decides which analyses are relevant to *this* schema (distributions, correlations, outliers, group-bys) and writes code producing a structured findings list — not a fixed checklist run identically regardless of content.
-4. **Chart Generation** (`agent/stages/chart.py`) — the agent picks a chart type per finding (histogram for a skewed distribution, scatter for a flagged correlation, bar for a categorical breakdown, line for a time trend) and writes the matplotlib code, with metadata recording what question each chart answers.
-5. **Insight Synthesis** (`agent/stages/synthesize.py`) — a **separate, final** LLM call, not code execution. It reads only the structured findings and chart metadata from stages 1-4 and writes the narrative. Kept distinct on purpose: stages 1-4 *produce* findings, this one *explains* them — mixing the two (e.g. asking the exploration step to also narrate) tends to produce both shallower analysis and blander prose.
+Splitting "decide what's worth doing" from "write the code for it" from "check whether the output is any good" gives each LLM call one job instead of several — and gives the human-in-the-loop gate something worth reading (a plan is legible in a way generated pandas code isn't).
 
-Stages 2-4 all go through the same generate → execute → self-correct loop (`agent/stages/common.py`): generate code, run it in the sandbox, and if it errors, feed the traceback back to the model for one corrective retry before giving up and recording the failure.
+0. **Load & Profile** (`agent/stages/load_profile.py`) — reads the file and profiles it by dtype: shape, null counts, cardinality, numeric stats, top categorical values, inferred datetime columns. Deliberately *not* LLM-generated — profiling by dtype is mechanical, has no judgment calls, and running our own trusted code here means one less place for things to go wrong before the agent has any context to reason about.
+1. **Planner** (`agent/agents/planner.py`) — one LLM call, given only the schema. Decides *what* to do, in plain English, no code yet: which cleaning steps this schema actually needs (not a fixed checklist — skips imputation for a 0%-null column, skips deduplication with no evidence of duplicates) and which exploratory analyses are worth running. This plan is what the **human-in-the-loop gate** shows for review (see below) — before any code has been written or executed.
+2. **Executor — Clean** (`agent/stages/clean.py`) — implements the *approved* cleaning steps (a human may have edited them). This stage's job is now HOW, not WHAT.
+3. **Executor — Explore** (`agent/stages/explore.py`) — computes exactly the planned analyses (distributions, correlations, outliers, group-bys), producing a structured findings list.
+4. **Critic — findings** (`agent/agents/critic.py`) — reviews the findings *before* they reach a chart or the narrative, and actually **drops** ones that are trivial ("there are 500 rows"), ungrounded (calls a correlation "strong" when the stat is near zero), or duplicate. This is a real filter, not a logged opinion — mutates the findings list in place. Runs between Explore and Chart so a dropped finding never gets charted.
+5. **Executor — Chart** (`agent/stages/chart.py`) — picks a chart type per surviving finding (histogram for a skewed distribution, scatter for a flagged correlation, bar for a categorical breakdown, line for a time trend) and writes the matplotlib code.
+6. **Synthesizer** (`agent/stages/synthesize.py`) — a **separate** LLM call, not code execution. Reads only the critic-approved findings and chart metadata and writes the narrative. Kept distinct on purpose: earlier stages *produce* findings, this one *explains* them.
+7. **Critic — narrative** (`agent/agents/critic.py`, same module) — LLM-as-judge over the finished narrative: is every claim grounded in the findings/cleaning actions it was given, does it say anything non-obvious, is it actionable. The *same function* is used live (shown in the UI as a judge badge) and by `eval/run_eval.py` (the "insight relevance" column) — one implementation, two call sites, so the eval number means what the live badge means.
+
+Stages 2, 3, and 5 all go through the same generate → execute → self-correct loop (`agent/stages/common.py`): generate code, run it in the sandbox, and if it errors, feed the traceback back to the model for one corrective retry before giving up and recording the failure.
+
+`agent/loop.py` exposes this as two entry points, not one: `plan_analysis()` runs stage 0-1 and stops (the checkpoint the human-in-the-loop gate reviews), `execute_analysis()` resumes from there through the rest, and `run_analysis()` is a convenience wrapper that does both with no human in the loop (what the eval harness and MCP server use).
+
+## Human-in-the-Loop
+
+The Planner's plan — not generated code — is the review point (`app.py`'s plan-review screen, backed by `plan_analysis()`/`execute_analysis()` in `agent/loop.py`). Reviewing "impute missing Age with median; drop 5 duplicate rows" is something a non-technical user can actually evaluate in two seconds; reviewing the pandas code that implements it is not. The cleaning steps render in an editable text box — edit a line, delete a line to skip it, or click "Skip cleaning entirely" — and nothing executes until "Approve & run." Exploration steps are shown read-only (informational, since they're non-destructive by nature — they only read `df`, never mutate it). Verified end-to-end with a real browser session (Playwright) against live Gemini: upload → real plan appears → edited/approved → Executor → Critic → Synthesizer run → results with the judge score all render correctly.
 
 ## Sandbox & Security
 
@@ -53,7 +66,7 @@ Two providers work behind the same `call_llm()` interface (`agent/llm.py`) — A
 
 ## Results
 
-Sandbox isolation (namespace confinement, copy-on-inject, timeout, traceback capture, chart export) and full pipeline wiring (stage sequencing, self-correction retry, state accumulation, chart-dir threading) are covered by tests run during development — 7/7 sandbox isolation checks pass, and all three `eval/test_datasets/` schemas run end-to-end without a crash, including a deliberate double-failure path that degrades gracefully instead of raising.
+Sandbox isolation (namespace confinement, copy-on-inject, timeout, traceback capture, chart export), the 4-agent pipeline (Planner → Executor → Critic → Synthesizer wiring, the Critic's filtering, the timeout/memory infra-flake retries), and the human-in-the-loop flow are all covered by a committed test suite (`tests/`, 12 tests, mocked — no API key needed to run it: `pytest tests/`) plus a real browser session (Playwright) and real MCP client calls against live Gemini for the parts a mock can't verify (model output quality, actual UI rendering, actual protocol handshakes).
 
 The table below is real `eval/run_eval.py` output against a live model (`gemini-flash-lite-latest`, the free Google AI Studio tier — an `ANTHROPIC_API_KEY` or `GOOGLE_API_KEY` is required to reproduce this, this repo doesn't ship one):
 
@@ -61,13 +74,48 @@ The table below is real `eval/run_eval.py` output against a live model (`gemini-
 |---|---|
 | Code execution success rate (first try) | 100% (9/9 code-generation steps across all 3 datasets) |
 | Code execution success rate (after retry) | 100% |
-| Chart-appropriateness score (automated proxy rubric) | 100% (10/10 charts across all 3 datasets) |
+| Chart-appropriateness score (automated proxy rubric) | 100% (9/9 charts across all 3 datasets) |
+| Insight relevance — grounded (LLM-as-judge, self-judged) | 5/5 on all 3 datasets — every claim traced back to a finding or cleaning action, no fabrication |
+| Insight relevance — non-obvious (LLM-as-judge, self-judged) | 3-4/5 across the 3 datasets |
+| Critic findings review | Real catches, not just passes: dropped a finding calling a 0.03 correlation "strong" (leads_deals), and one restating an uninformative 0.24-0.28 range across categories as if meaningful (titanic_like) |
 | Datasets tested | 3 — `titanic_like.csv` (505x9), `retail_sales.csv` (5943x8), `leads_deals.csv` (350x10) — synthetic, structurally distinct: survival/demographics, time-series retail transactions, CRM pipeline |
-| Avg latency / cost per dataset | 9.3s / $0.0000 (free tier; cost estimate is $0 by design on that tier, see Model Providers) |
+| Avg latency / cost per dataset | 13.0s / $0.0000 (free tier; cost estimate is $0 by design on that tier, see Model Providers; latency is up from the pre-4-agent 9.3s baseline — 2 more LLM calls per run, Planner + Critic) |
 
-Full per-dataset output, including the actual findings, chart questions, and narrative summaries the model produced, is in `eval/results.json`. Re-run with `python eval/run_eval.py --model <model> --budget <usd>` — numbers will vary run to run since the model isn't pinned to a fixed seed.
+Full per-dataset output, including the actual findings, chart questions, narrative summaries, and judge reasoning, is in `eval/results.json`. Re-run with `python eval/run_eval.py --model <model> --budget <usd>` (add `--judge-model <model>` to use a different, independent model for scoring — see "Critic & LLM-as-Judge") — numbers will vary run to run since the model isn't pinned to a fixed seed.
 
 `eval/run_eval.py`'s chart-appropriateness score is an automated proxy (does the chosen chart type belong to a small allowed set per finding kind — e.g. a `correlation` finding should get a `scatter`, not a `line`), not a full rubric read. A 100% score here means every chart type chosen was defensible for its finding, not that the charts are polished — pair it with a human pass per README's original evaluation plan for a full appropriateness read, and treat the same 2-3 chart types every run (rather than the histogram/bar/scatter/line mix actually observed) as the real warning sign that the chart stage isn't reasoning about content.
+
+## Critic & LLM-as-Judge
+
+`agent/agents/critic.py` has two functions, both scoped to structured state (never raw data — same injection-safety story as every other stage):
+
+- **`review_findings()`** runs live, in the loop, between Explore and Chart. It's a real filter — findings it drops never get a chart or reach the narrative — not a logged opinion. Fails open on a parse error (keeps everything) rather than silently emptying the report.
+- **`review_narrative()`** is the LLM-as-judge: scores the finished narrative on `grounded_score` (does every claim trace back to the findings *or* cleaning actions it was given — both are legitimate sources, a mistake in the first version of this that scored a true statement as "hallucination" until fixed), `non_obvious_score`, and `actionable`. Used live (the judge badge in the UI) and, **the same function, unmodified**, as `eval/run_eval.py`'s insight-relevance metric — one implementation, two call sites, so the eval number and the UI badge mean the same thing.
+
+A model judging its own output is weaker evidence than an independent judge (it's more likely to rate its own confident-sounding-but-wrong narrative as fine). Self-judging is the default — zero extra config, and it's what the Results table above uses — but `run_analysis()`/`eval/run_eval.py --judge-model <model>` let you point the judge at a different, stronger model for more trustworthy numbers.
+
+## MCP Server
+
+`mcp_server.py` wraps the whole pipeline as one MCP tool, `analyze_dataset(file_path, model, budget_usd)`, so any MCP-aware client — Claude Desktop, Claude Code, another agent — can call it directly, no browser involved. It's a thin adapter: calls `agent.loop.run_analysis()` exactly like `app.py` does, no duplicated pipeline logic. Charts come back as inline image content blocks (most clients render them directly in the conversation), and the narrative + findings as a text block.
+
+Test it locally with the SDK's dev inspector:
+```bash
+mcp dev mcp_server.py
+```
+
+Register it with Claude Desktop by adding to `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "auto-analyst": {
+      "command": "/absolute/path/to/.venv/bin/python",
+      "args": ["/absolute/path/to/mcp_server.py"]
+    }
+  }
+}
+```
+
+Verified with a real MCP client connecting over stdio (not just an import check): session initializes, `analyze_dataset` is listed, and a real call against live Gemini returns one text block plus 3 chart images.
 
 ## Key Learnings
 
@@ -83,6 +131,10 @@ Both bugs share a shape: a component that reports success while the orchestratio
 
 **The fix that "worked locally" but didn't hold on the second deploy — because I misdiagnosed the root cause.** The above fix (wrapping the worker's body in try/except, plus a fast-retry with 2x memory) resolved the failure on my machine but the user redeployed and hit the *identical* opaque `"Sandbox process exited (code 1)"` again. Going back to the earlier test output I'd already produced but hadn't read carefully enough: at the memory limit where deployed failures actually happen, `Queue.put()` needs to spin up a background feeder thread whose stack no longer fits in the tightened address space, so `Queue.put()` itself raises `RuntimeError: can't start new thread` — meaning the try/except's error-reporting branch can't run either. My try/except "fix" caught the `MemoryError`, then failed to report it. Doubling the memory ceiling on retry didn't help either: on a 1GB-total host, `2 * 700MB` is already past what's available. The whole approach was wrong. RLIMIT_AS accounts for memory-mapped shared libraries and thread-stack address space that isn't really "used memory", so on a container-limited host it can starve pandas' imports before user code ever runs, while the container's own OOM protection is a truer, better cap. Fixed properly this time by making the RLIMIT_AS cap opt-in (default `SANDBOX_MEMORY_LIMIT_MB=0` = don't set the limit at all) and letting the container's memory enforcement be the real backstop. Also fixed a related timing bug the same postmortem surfaced: `result_queue.get(timeout=15)` was blocking the full 15 seconds even when the child had already died in 100ms, because a blocking `get()` doesn't know the process is dead — replaced with a 200ms poll that checks both the queue and `proc.is_alive()`, so silent crashes now surface roughly one poll interval after they happen instead of taking the full stage timeout. Combined effect on the user's exact failing dataset: from 127.3s of total failures to 9.8s of first-try successes. The lesson from having to fix this twice: an isolated repro that hangs on my machine ("6/6 clean runs post-fix") isn't the same as an isolated repro that mirrors the production failure mode — I should have re-read my own diagnostic output more carefully before concluding I'd fixed it.
 
+**A judge that flagged a true statement as fabrication, because I scoped its grounding source too narrowly.** Building the LLM-as-judge (`review_narrative()`) and running it live for the first time against `leads_deals.csv`, it scored the narrative `grounded_score: 1/5`, reasoning that the phrase "malicious prompt injection payload hidden within the notes column" was hallucinated. It wasn't — that exact phrase came from `cleaning_actions_taken`, which the Synthesizer's prompt is legitimately allowed to draw from, but my judge prompt only showed it `findings`, not cleaning actions. The narrative was correctly grounded in material the judge simply hadn't been shown. Fixed by passing both sources to the judge; re-ran the identical case and the score corrected to `5/5`. Caught only because the judge was run live against a real narrative instead of just a canned mocked response in a test — a test with a fabricated "grounded" fixture would have passed regardless of this scoping bug, since the bug was in what the judge could *see*, not in how it parsed what it was given.
+
+**Two bugs a real client caught that an import check couldn't.** Two more this session, both invisible to `python -m py_compile` or "the app boots and returns HTTP 200": (1) `app.py` called `load_dotenv()` *after* `from agent.llm import DEFAULT_MODEL` — but `agent/llm.py` reads `ANALYSIS_MODEL` from the environment at *import* time, so the sidebar's model field silently ignored `.env` and always showed the hardcoded `claude-sonnet-5` fallback. Existed since the very first version of this file; never caught because every prior check was either a bare HTTP-200 boot check or a scratchpad script that happened to call `load_dotenv()` first by accident. Caught only by driving the actual app with Playwright and reading what the sidebar displayed. (2) `mcp_server.py`'s tool was annotated `-> list[str | Image]`; FastMCP tries to build a pydantic output schema from a tool's return-type annotation, and `Image` (a content-conversion marker, not a schema-compatible type) can't produce one — the server crashed constructing its own tool list at startup, which a real MCP client saw as "Connection closed" at `initialize()`. An import check (`import mcp_server`) doesn't trigger tool registration the same way a client's `list_tools()` round-trip does, so it passed clean while the actual protocol handshake failed. Both fixes were one line; both bugs would have shipped without a client that actually spoke the protocol instead of just importing the module.
+
 ## How to Run
 
 ```bash
@@ -91,13 +143,20 @@ pip install -r requirements.txt
 
 cp .env.example .env   # then add ANTHROPIC_API_KEY or GOOGLE_API_KEY (free: https://aistudio.google.com/apikey)
 
-# Frontend
+# Committed test suite — mocked, no API key needed, ~10s
+pytest tests/
+
+# Frontend (human-in-the-loop plan review, live judge scores)
 streamlit run app.py
+
+# MCP server — expose the pipeline as a tool for Claude Desktop/Code or another agent
+mcp dev mcp_server.py          # interactive dev inspector
+# or register it in claude_desktop_config.json — see "MCP Server" above
 
 # Regenerate the synthetic eval datasets (already checked into eval/test_datasets/)
 python eval/generate_datasets.py
 
-# Run the evaluation harness across all three test datasets
+# Run the evaluation harness across all three test datasets (needs a real API key)
 python eval/run_eval.py --budget 1.0
 ```
 
@@ -123,25 +182,31 @@ auto-analyst/
 ├── agent/
 │   ├── state.py          # AnalysisState — the only thing that grows across stages
 │   ├── sandbox.py         # restricted exec + timeout + memory limits + copy-on-inject
-│   ├── llm.py              # Anthropic API wrapper + cost/token tracking + budget ceiling
-│   ├── loop.py             # orchestrates the 5 stages
+│   ├── llm.py              # Anthropic/Google API wrapper + cost/token tracking + budget ceiling
+│   ├── loop.py             # plan_analysis() / execute_analysis() / run_analysis()
+│   ├── agents/
+│   │   ├── planner.py        # decides WHAT to do, plain English, no code
+│   │   └── critic.py          # filters findings live + LLM-as-judge (reused in eval)
 │   └── stages/
 │       ├── common.py        # shared generate -> execute -> self-correct loop
 │       ├── load_profile.py  # deterministic profiling (no LLM)
-│       ├── clean.py
-│       ├── explore.py
+│       ├── clean.py         # implements the Planner's approved cleaning steps
+│       ├── explore.py       # implements the Planner's approved exploration steps
 │       ├── chart.py
 │       └── synthesize.py    # separate final insight-summary call
 ├── eval/
 │   ├── generate_datasets.py # builds the 3 synthetic test datasets
 │   ├── test_datasets/       # titanic_like.csv, retail_sales.csv, leads_deals.csv
-│   └── run_eval.py          # execution success rate, chart-appropriateness proxy, latency/cost
-├── app.py                    # Streamlit frontend
+│   └── run_eval.py          # execution success rate, chart-appropriateness, insight relevance
+├── tests/                    # committed pytest suite, mocked, no API key needed
+├── app.py                    # Streamlit frontend — plan review, live progress, judge score
+├── mcp_server.py              # exposes analyze_dataset as an MCP tool
 └── outputs/charts/           # generated chart images
 ```
 
 ## Limitations / Extension Roadmap
 
-- The sandbox is a restricted local `exec()` with process isolation, a timeout, and a memory cap — appropriate for a portfolio build, but not the same guarantee as a real container/VM boundary. For a production-grade version, a cloud code-interpreter sandbox (E2B, Daytona) would also solve *stateful* execution across a longer multi-step session instead of reloading data per call.
-- Chart-appropriateness is scored by an automated proxy rubric here, not LLM-as-judge or a full human pass — see Results above.
-- Natural extension: wrap `run_analysis()` as an MCP tool (`analyze_dataset`) so another agent can call this one as a specialist over MCP instead of reimplementing data analysis itself.
+- The sandbox is a restricted local `exec()` with process isolation, a timeout, and (optionally, off by default on container hosts) a memory cap — appropriate for a portfolio build, but not the same guarantee as a real container/VM boundary. For a production-grade version, a cloud code-interpreter sandbox (E2B, Daytona) would also solve *stateful* execution across a longer multi-step session instead of reloading data per call.
+- Chart-appropriateness is scored by an automated proxy rubric, not LLM-as-judge or a full human pass — see Results above. (Insight relevance *does* now use LLM-as-judge — see "Critic & LLM-as-Judge" — this is specifically about chart type scoring.)
+- The Critic's `review_findings()` only reviews findings, not charts directly — a finding it keeps could still get a mediocre chart. A second critic pass after Chart is a natural extension if chart quality becomes the bottleneck.
+- Self-judging (same model for analysis and judging) is the eval default; `--judge-model` supports an independent judge but isn't the default, since it adds a second provider/cost dependency for a step that's optional.

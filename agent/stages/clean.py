@@ -1,6 +1,9 @@
-"""Stage 2: Clean. Agent proposes and executes a cleaning plan (nulls,
-dtype mismatches, duplicates) based only on the schema profile, then
-reports what it did in plain English for the UI / audit trail."""
+"""Stage 2: Clean (Executor half of clean). Implements the cleaning steps
+the Planner already decided on and a human may have reviewed/edited — this
+stage's job is HOW (write correct pandas code), not WHAT (that was the
+Planner's job). Falls back to deciding for itself only if no plan was
+supplied, so the stage still works standalone (eval scripts, tests, or any
+caller that skips planning)."""
 
 from __future__ import annotations
 
@@ -12,7 +15,21 @@ from agent.llm import CostTracker
 from agent.state import AnalysisState
 from agent.stages.common import SANDBOX_SYSTEM_PREAMBLE, _run_with_retry
 
-_TASK = """Given the dataset profile below, write pandas code that cleans `df`:
+_TASK_WITH_PLAN = """Implement EXACTLY the following approved cleaning steps against `df` — do not
+add steps beyond this list, and do not skip any of them:
+
+{plan_text}
+
+Reassign the cleaned result to `df`. Also build a Python list of short strings named
+`cleaning_actions` describing each action you took, in the same order as the plan (e.g. "Imputed
+12 missing values in 'age' with median").
+
+Dataset profile (schema + aggregated stats only, no raw rows), for column names/dtypes only —
+the cleaning decisions themselves are already made, use this just to write correct code:
+{profile_json}
+"""
+
+_TASK_NO_PLAN = """Given the dataset profile below, decide on and write pandas code that cleans `df`:
 - Handle missing values sensibly per column (impute, or drop rows/cols only when null_pct is very high).
 - Fix obvious dtype mismatches (e.g. a numeric column stored as text).
 - Drop exact duplicate rows if any exist.
@@ -27,9 +44,20 @@ Dataset profile (schema + aggregated stats only, no raw rows):
 """
 
 
-def run(state: AnalysisState, df: pd.DataFrame, tracker: CostTracker, model: str) -> pd.DataFrame:
+def run(
+    state: AnalysisState,
+    df: pd.DataFrame,
+    tracker: CostTracker,
+    model: str,
+    planned_steps: list[str] | None = None,
+) -> pd.DataFrame:
     profile_json = json.dumps(state["dataset_schema"], default=str)[:6000]
-    user_prompt = _TASK.format(profile_json=profile_json)
+
+    if planned_steps:
+        plan_text = "\n".join(f"- {s}" for s in planned_steps)
+        user_prompt = _TASK_WITH_PLAN.format(plan_text=plan_text, profile_json=profile_json)
+    else:
+        user_prompt = _TASK_NO_PLAN.format(profile_json=profile_json)
 
     result, _ = _run_with_retry(
         system=SANDBOX_SYSTEM_PREAMBLE,

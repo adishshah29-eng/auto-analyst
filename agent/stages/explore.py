@@ -1,7 +1,8 @@
-"""Stage 3: Exploratory Analysis. Agent decides what's worth looking at
-(distributions, correlations, outliers, group-bys) based on the schema it
-profiled and the cleaning it already did — not a fixed checklist run
-identically on every dataset."""
+"""Stage 3: Exploratory Analysis (Executor half of explore). Computes the
+analyses the Planner already decided were worth running — this stage's job
+is HOW (write correct pandas code to check each planned item), not WHAT.
+Falls back to deciding for itself if no plan was supplied, so it still
+works standalone."""
 
 from __future__ import annotations
 
@@ -13,7 +14,26 @@ from agent.llm import CostTracker
 from agent.state import AnalysisState
 from agent.stages.common import SANDBOX_SYSTEM_PREAMBLE, _run_with_retry
 
-_TASK = """Given the cleaned dataset's profile below, explore `df` and surface what's actually
+_TASK_WITH_PLAN = """Compute EXACTLY the following approved analyses against `df` — one finding per
+planned item (skip an item only if the code genuinely can't produce it, e.g. a planned correlation
+against a column that turned out to be constant):
+
+{plan_text}
+
+Build a Python list of dicts named `findings`, each shaped like:
+{{"kind": "distribution" | "correlation" | "outlier" | "groupby" | "other",
+  "description": "<one plain-English sentence stating the finding, with the actual numbers>",
+  "stats": {{...small dict of the supporting numbers...}}}}
+Do not put any raw row-level data into `findings` — aggregated numbers only.
+
+Cleaning already applied: {cleaning_actions}
+
+Dataset profile (schema + aggregated stats only, no raw rows), for column names/dtypes only —
+the analysis decisions themselves are already made, use this just to write correct code:
+{profile_json}
+"""
+
+_TASK_NO_PLAN = """Given the cleaned dataset's profile below, explore `df` and surface what's actually
 interesting about THIS dataset. Choose analyses appropriate to the columns present, e.g.:
 - distribution shape (skew, spread) for numeric columns worth calling out
 - correlations between numeric columns, especially ones that are surprising or strong
@@ -37,12 +57,23 @@ Dataset profile (schema + aggregated stats only, no raw rows):
 """
 
 
-def run(state: AnalysisState, df: pd.DataFrame, tracker: CostTracker, model: str) -> None:
+def run(
+    state: AnalysisState,
+    df: pd.DataFrame,
+    tracker: CostTracker,
+    model: str,
+    planned_steps: list[str] | None = None,
+) -> None:
     profile_json = json.dumps(state["dataset_schema"], default=str)[:6000]
-    user_prompt = _TASK.format(
-        profile_json=profile_json,
-        cleaning_actions=json.dumps(state["cleaning_actions_taken"][-10:]),
-    )
+    cleaning_actions = json.dumps(state["cleaning_actions_taken"][-10:])
+
+    if planned_steps:
+        plan_text = "\n".join(f"- {s}" for s in planned_steps)
+        user_prompt = _TASK_WITH_PLAN.format(
+            plan_text=plan_text, profile_json=profile_json, cleaning_actions=cleaning_actions
+        )
+    else:
+        user_prompt = _TASK_NO_PLAN.format(profile_json=profile_json, cleaning_actions=cleaning_actions)
 
     result, _ = _run_with_retry(
         system=SANDBOX_SYSTEM_PREAMBLE,

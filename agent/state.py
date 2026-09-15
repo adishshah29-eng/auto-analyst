@@ -12,10 +12,21 @@ import time
 from typing import Any, TypedDict
 
 
+class PlannedStep(TypedDict):
+    stage: str  # "clean" | "explore"
+    description: str  # plain English, no code — what to do and why
+
+
 class Finding(TypedDict):
     kind: str  # e.g. "distribution", "correlation", "outlier", "groupby"
     description: str
     stats: dict[str, Any]
+
+
+class CriticReview(TypedDict):
+    kept: int
+    dropped: int
+    reasons: list[str]  # one short reason per dropped finding/chart, for the UI/log
 
 
 class ChartMeta(TypedDict):
@@ -35,9 +46,13 @@ class CodeStep(TypedDict):
 class AnalysisState(TypedDict):
     dataset_name: str
     dataset_schema: dict[str, Any]
+    plan: list[PlannedStep]  # from the Planner agent; empty until planned
+    plan_approved: bool  # False while awaiting human review (HITL gate)
     cleaning_actions_taken: list[str]
     findings: list[Finding]
     charts_generated: list[ChartMeta]
+    critic_review: CriticReview | None
+    narrative_review: dict[str, Any] | None  # LLM-as-judge score, see agent.agents.critic.review_narrative
     code_history: list[CodeStep]
     total_cost_usd: float
     total_tokens: dict[str, int]
@@ -49,9 +64,13 @@ def new_state(dataset_name: str) -> AnalysisState:
     return AnalysisState(
         dataset_name=dataset_name,
         dataset_schema={},
+        plan=[],
+        plan_approved=False,
         cleaning_actions_taken=[],
         findings=[],
         charts_generated=[],
+        critic_review=None,
+        narrative_review=None,
         code_history=[],
         total_cost_usd=0.0,
         total_tokens={"input": 0, "output": 0},
