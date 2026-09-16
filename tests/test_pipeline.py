@@ -169,3 +169,38 @@ def test_critic_fails_open_on_unparseable_response():
         critic.review_findings(state, tracker=None, model="x")
 
     assert len(state["findings"]) == 1
+
+
+def test_review_narrative_shows_the_judge_the_schema_too():
+    """Regression test: review_narrative() originally only showed the judge
+    `findings` + `cleaning_actions_taken`, so a narrative correctly citing a
+    schema-level fact (row/column counts, a date range, a category
+    distribution — all legitimately available to the Synthesizer via
+    summarize_for_prompt) got scored as fabrication. Caught live: a real
+    narrative citing "94 unique roads... spanning Jan 1 to Mar 26" (schema
+    facts) scored grounded_score 3/5 with reasoning calling them
+    unsupported. The fix passes dataset_schema to the judge too — this test
+    locks in that the schema actually reaches the prompt, not just that
+    *some* JSON does."""
+    from agent.agents import critic
+
+    state = new_state("test3")
+    state["dataset_schema"] = {"n_rows": 9000, "columns": {"road": {"n_unique": 94}}}
+    state["findings"] = []
+    state["cleaning_actions_taken"] = []
+    state["narrative_summary"] = "The dataset spans 94 unique roads."
+
+    captured = {}
+
+    def fake_call_llm(system, user_message, tracker=None, model=None, max_tokens=2048, temperature=0.2):
+        captured["user_message"] = user_message
+        return LLMResponse(
+            text='```json\n{"grounded_score": 5, "non_obvious_score": 2, "actionable": false, "reasoning": "ok"}\n```',
+            input_tokens=10, output_tokens=5, cost_usd=0.0,
+        )
+
+    with patch("agent.agents.critic.call_llm", side_effect=fake_call_llm):
+        score = critic.review_narrative(state, tracker=None, model="x")
+
+    assert "94" in captured["user_message"], "the schema fact the narrative cites must reach the judge's prompt"
+    assert score["grounded_score"] == 5

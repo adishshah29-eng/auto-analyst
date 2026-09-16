@@ -46,13 +46,14 @@ _REVIEW_FINDINGS_USER = """Findings to review:
 """
 
 _REVIEW_NARRATIVE_SYSTEM = """You are a judge scoring a data-analysis agent's final narrative summary,
-for an evaluation harness. You are given the structured findings the narrative was supposed to be
-based on, and the narrative itself.
+for an evaluation harness. You are given the dataset schema, cleaning actions, and structured
+findings the narrative was allowed to draw on, and the narrative itself.
 
 Score on three axes:
 - "grounded_score" (1-5): does every specific number/claim in the narrative trace back to something
-  in the findings? 5 = fully grounded, 1 = the narrative states specifics not present in the findings
-  at all (fabrication).
+  in the schema, the cleaning actions, OR the findings — all three are legitimate sources, not just
+  findings. 5 = fully grounded, 1 = the narrative states specifics not present in any of the three
+  (fabrication).
 - "non_obvious_score" (1-5): does the narrative surface something a reader wouldn't get from just
   glancing at row/column counts? 5 = genuinely surprising or decision-relevant, 1 = pure boilerplate
   ("the dataset has N rows and M columns").
@@ -63,9 +64,14 @@ Respond with a single ```json code block:
 {"grounded_score": 1-5, "non_obvious_score": 1-5, "actionable": true/false, "reasoning": "<1-2 sentences>"}
 """
 
-_REVIEW_NARRATIVE_USER = """The narrative below is allowed to draw on BOTH of these sources — ground
-your score against both, not findings alone (a narrative correctly mentioning a cleaning action,
-e.g. a dropped column, is grounded even though that fact lives here and not in the findings list):
+_REVIEW_NARRATIVE_USER = """The narrative below is allowed to draw on ALL THREE of these sources —
+ground your score against all of them, not findings alone. A narrative stating a schema-level fact
+(row/column counts, a date range from a datetime column, a category distribution from a
+categorical column's top values) is grounded even though that fact lives in the schema, not the
+findings list — the Synthesizer that wrote this narrative was given the schema too.
+
+Dataset schema (dtypes, null %, cardinality, date ranges, top categorical values):
+{schema_json}
 
 Cleaning actions taken:
 {cleaning_actions_json}
@@ -127,11 +133,13 @@ def review_narrative(state: AnalysisState, tracker: CostTracker, model: str) -> 
     if not state["narrative_summary"]:
         return {"grounded_score": None, "non_obvious_score": None, "actionable": None, "reasoning": "no narrative to score"}
 
+    schema_json = json.dumps(state["dataset_schema"], default=str)[:4000]
     findings_json = json.dumps(state["findings"], default=str)[:6000]
     cleaning_actions_json = json.dumps(state["cleaning_actions_taken"], default=str)[:2000]
     resp = call_llm(
         system=_REVIEW_NARRATIVE_SYSTEM,
         user_message=_REVIEW_NARRATIVE_USER.format(
+            schema_json=schema_json,
             findings_json=findings_json,
             cleaning_actions_json=cleaning_actions_json,
             narrative=state["narrative_summary"][:4000],
