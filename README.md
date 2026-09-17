@@ -86,18 +86,18 @@ Two providers work behind the same `call_llm()` interface (`agent/llm.py`) — A
 
 Sandbox isolation (namespace confinement, copy-on-inject, timeout, traceback capture, chart export), the 4-agent pipeline (Planner → Executor → Critic → Synthesizer wiring, the Critic's filtering, the significance gate, the timeout/memory infra-flake retries), the prompt-injection marker actually reaching every stage's prompt, and the human-in-the-loop flow are all covered by a committed test suite (`tests/`, 34 tests, mocked — no API key needed to run it: `pytest tests/`, and run automatically on every push/PR via `.github/workflows/tests.yml`) plus a real browser session (Playwright) and real MCP client calls against live Gemini for the parts a mock can't verify (model output quality, actual UI rendering, actual protocol handshakes).
 
-The table below is real `eval/run_eval.py` output against a live model (`gemini-flash-lite-latest`, the free Google AI Studio tier — an `ANTHROPIC_API_KEY` or `GOOGLE_API_KEY` is required to reproduce this, this repo doesn't ship one):
+The table below is real `eval/run_eval.py` output against a live model (`gemini-flash-lite-latest`, the free Google AI Studio tier — an `ANTHROPIC_API_KEY` or `GOOGLE_API_KEY` is required to reproduce this, this repo doesn't ship one). Full output in `eval/results.json`.
 
 | Metric | Value |
 |---|---|
-| Code execution success rate (first try) | 100% (9/9 code-generation steps across all 3 datasets) |
+| Code execution success rate (first try) | 100% across all 3 datasets |
 | Code execution success rate (after retry) | 100% |
-| Chart-appropriateness score (automated proxy rubric) | 100% (9/9 charts across all 3 datasets) |
-| Insight relevance — grounded (LLM-as-judge, self-judged) | 5/5 on all 3 datasets — every claim traced back to a finding or cleaning action, no fabrication |
+| Chart-appropriateness score (automated proxy rubric) | 100% on 2 of 3 datasets, 75% on retail_sales.csv (one chart type not in the allowed set for its finding kind — see the proxy-rubric caveat below the table) |
+| Insight relevance — grounded (LLM-as-judge, self-judged) | 5/5 on all 3 datasets |
 | Insight relevance — non-obvious (LLM-as-judge, self-judged) | 3-4/5 across the 3 datasets |
-| Critic findings review | Real catches, not just passes: dropped a finding calling a 0.03 correlation "strong" (leads_deals), and one restating an uninformative 0.24-0.28 range across categories as if meaningful (titanic_like) |
-| Datasets tested | 3 — `titanic_like.csv` (505x9), `retail_sales.csv` (5943x8), `leads_deals.csv` (350x10) — synthetic, structurally distinct: survival/demographics, time-series retail transactions, CRM pipeline |
-| Avg latency / cost per dataset | 13.0s / $0.0000 (free tier; cost estimate is $0 by design on that tier, see Model Providers; latency is up from the pre-4-agent 9.3s baseline — 2 more LLM calls per run, Planner + Critic) |
+| Critic findings review | Real catches, run to run: on one run, dropped a finding restating a basic row/survival-rate summary and two near-zero correlations explicitly flagged as noise (titanic_like, 2 kept of 5); on another, kept all 4 leads_deals findings but 3 of the 4 had already been caveated by the significance gate (a win rate on 12 events, a conversion rate on 13, an outlier count of 15) and the Synthesizer hedged each one in the narrative instead of stating it as fact — see "Critic & LLM-as-Judge" |
+| Datasets tested | 3 — `titanic_like.csv` (505x9), `retail_sales.csv` (5943x8), `leads_deals.csv` (350x10) — synthetic, structurally distinct: survival/demographics, time-series retail transactions, CRM pipeline. None of the three has a small enough category for the significance gate's plain row-count check to fire (`leads_deals.csv`'s smallest, `deal_stage == 'Negotiation'`, has n=26 but the model never grouped by it) — the gate's *event-count* check is what actually fires on real runs, on any rate/proportion claim thin enough regardless of the row count behind it, which is exactly what happened on leads_deals above |
+| Avg latency / cost per dataset | 13.7s / $0.0000 (free tier; cost estimate is $0 by design on that tier, see Model Providers) |
 
 Full per-dataset output, including the actual findings, chart questions, narrative summaries, and judge reasoning, is in `eval/results.json`. Re-run with `python eval/run_eval.py --model <model> --budget <usd>` (add `--judge-model <model>` to use a different, independent model for scoring — see "Critic & LLM-as-Judge") — numbers will vary run to run since the model isn't pinned to a fixed seed.
 

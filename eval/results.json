@@ -3,51 +3,13 @@
     "dataset": "leads_deals.csv",
     "rows": 350,
     "cols": 10,
-    "latency_s": 13.9,
+    "latency_s": 16.35,
     "cost_usd": 0.0,
-    "input_tokens": 10920,
-    "output_tokens": 2086,
-    "n_findings": 3,
-    "n_charts": 3,
-    "n_cleaning_actions": 2,
-    "execution": {
-      "first_try_success_rate": 1.0,
-      "final_success_rate_after_retry": 1.0,
-      "n_retries_used": 0,
-      "n_code_generation_steps": 3
-    },
-    "chart_appropriateness": {
-      "score": 1.0,
-      "n_charts": 3,
-      "distinct_chart_types": 3,
-      "note": "proxy rubric \u2014 see APPROPRIATE_CHART_TYPES; pair with a human pass per dataset"
-    },
-    "insight_relevance": {
-      "grounded_score": 5,
-      "non_obvious_score": 3,
-      "actionable": true,
-      "reasoning": "The narrative is fully grounded in the provided findings and cleaning actions, accurately reporting specific metrics like win rates, deal value stats, and the prompt injection security action. It surfaces concrete insights regarding industry performance and volume peaks that could inform resource allocation."
-    },
-    "critic_findings_review": {
-      "kept": 3,
-      "dropped": 1,
-      "reasons": [
-        "Calls the correlation 'strong' when the stats show it is near zero (0.03), directly contradicting the support rule."
-      ]
-    },
-    "stopped_early": null
-  },
-  {
-    "dataset": "retail_sales.csv",
-    "rows": 5943,
-    "cols": 8,
-    "latency_s": 13.15,
-    "cost_usd": 0.0,
-    "input_tokens": 14985,
-    "output_tokens": 1888,
-    "n_findings": 8,
+    "input_tokens": 13248,
+    "output_tokens": 2633,
+    "n_findings": 4,
     "n_charts": 4,
-    "n_cleaning_actions": 1,
+    "n_cleaning_actions": 3,
     "execution": {
       "first_try_success_rate": 1.0,
       "final_success_rate_after_retry": 1.0,
@@ -57,17 +19,55 @@
     "chart_appropriateness": {
       "score": 1.0,
       "n_charts": 4,
-      "distinct_chart_types": 4,
+      "distinct_chart_types": 2,
+      "note": "proxy rubric \u2014 see APPROPRIATE_CHART_TYPES; pair with a human pass per dataset"
+    },
+    "insight_relevance": {
+      "grounded_score": 5,
+      "non_obvious_score": 3,
+      "actionable": true,
+      "reasoning": "The narrative is completely grounded in the provided schema, cleaning actions, and findings. It highlights top-performing segments (lead sources, industries, sales reps) which are actionable for sales and marketing strategy, though it largely restates the findings and schema points without deep new synthesis."
+    },
+    "critic_findings_review": {
+      "kept": 4,
+      "dropped": 1,
+      "reasons": [
+        "correlation of 0.0275 is practically zero and explicitly noted as weak noise by the caveat, offering no meaningful analytical insight"
+      ]
+    },
+    "stopped_early": null
+  },
+  {
+    "dataset": "retail_sales.csv",
+    "rows": 5943,
+    "cols": 8,
+    "latency_s": 12.79,
+    "cost_usd": 0.0,
+    "input_tokens": 10920,
+    "output_tokens": 2108,
+    "n_findings": 4,
+    "n_charts": 4,
+    "n_cleaning_actions": 1,
+    "execution": {
+      "first_try_success_rate": 1.0,
+      "final_success_rate_after_retry": 1.0,
+      "n_retries_used": 0,
+      "n_code_generation_steps": 3
+    },
+    "chart_appropriateness": {
+      "score": 0.75,
+      "n_charts": 4,
+      "distinct_chart_types": 3,
       "note": "proxy rubric \u2014 see APPROPRIATE_CHART_TYPES; pair with a human pass per dataset"
     },
     "insight_relevance": {
       "grounded_score": 5,
       "non_obvious_score": 4,
       "actionable": true,
-      "reasoning": "The narrative accurately reflects the provided findings and cleaning steps without hallucinating numbers. It highlights useful business insights such as Electronics' dominance and the lack of revenue impact from discounts, making it actionable for inventory and pricing strategy."
+      "reasoning": "The narrative is fully grounded in the provided findings and schema, highlighting key revenue drivers like top product categories, regional performance, and correlations that are useful for business planning."
     },
     "critic_findings_review": {
-      "kept": 8,
+      "kept": 4,
       "dropped": 0,
       "reasons": []
     },
@@ -77,11 +77,11 @@
     "dataset": "titanic_like.csv",
     "rows": 505,
     "cols": 9,
-    "latency_s": 11.97,
+    "latency_s": 11.85,
     "cost_usd": 0.0,
-    "input_tokens": 11543,
-    "output_tokens": 1655,
-    "n_findings": 3,
+    "input_tokens": 11286,
+    "output_tokens": 1736,
+    "n_findings": 2,
     "n_charts": 2,
     "n_cleaning_actions": 3,
     "execution": {
@@ -93,20 +93,22 @@
     "chart_appropriateness": {
       "score": 1.0,
       "n_charts": 2,
-      "distinct_chart_types": 2,
+      "distinct_chart_types": 1,
       "note": "proxy rubric \u2014 see APPROPRIATE_CHART_TYPES; pair with a human pass per dataset"
     },
     "insight_relevance": {
       "grounded_score": 5,
-      "non_obvious_score": 4,
+      "non_obvious_score": 3,
       "actionable": true,
-      "reasoning": "The narrative accurately incorporates all cleaning actions and exploratory findings without hallucination. It surfaces clear segment-level risks (survival rates by class/gender) that are useful for understanding the dataset."
+      "reasoning": "The narrative accurately reflects the schema size (505 rows) and directly utilizes the structured findings for survival rates by class and gender. The findings are specific and decision-relevant regarding survival factors in the dataset."
     },
     "critic_findings_review": {
-      "kept": 3,
-      "dropped": 1,
+      "kept": 2,
+      "dropped": 3,
       "reasons": [
-        "Survival rates by embarkation port show very little variation (0.24 to 0.28) and are largely uninformative/generic compared to the other findings."
+        "only restates basic dataset summary statistics (total passengers and survival rate) rather than a specific substantive insight",
+        "correlation is near zero (0.02) and explicitly flagged as weak/noise",
+        "correlation with survival is very weak (0.087), essentially negligible"
       ]
     },
     "stopped_early": null
