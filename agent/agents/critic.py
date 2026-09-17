@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import json
 
+from agent.agents.significance import flag_low_confidence_findings
 from agent.llm import CostTracker, call_llm, extract_json
+from agent.stages.common import format_data_block
 from agent.state import AnalysisState, CriticReview
 
 _REVIEW_FINDINGS_SYSTEM = """You are a critic agent reviewing a data analysis pipeline's output before
@@ -35,6 +37,10 @@ Drop a finding if it:
 
 Keep a finding if it's specific, supported by its own stats, and says something non-generic about
 this dataset.
+
+Some findings carry a "caveat" field (set by a deterministic pre-check, not an opinion) noting a
+small sample size or a weak effect. A caveated finding is fine to keep — it's still real, just
+weaker evidence — weigh the caveat rather than treating it as automatic grounds to drop.
 
 Respond with a single ```json code block:
 {"keep_indices": [0, 2, 3, ...], "drop_reasons": {"1": "restates row count, not a real finding", ...}}
@@ -70,7 +76,6 @@ ground your score against all of them, not findings alone. A narrative stating a
 categorical column's top values) is grounded even though that fact lives in the schema, not the
 findings list — the Synthesizer that wrote this narrative was given the schema too.
 
-Dataset schema (dtypes, null %, cardinality, date ranges, top categorical values):
 {schema_json}
 
 Cleaning actions taken:
@@ -86,7 +91,13 @@ Narrative to score:
 
 def review_findings(state: AnalysisState, tracker: CostTracker, model: str) -> CriticReview:
     """Filters state["findings"] in place. Runs between Explore and Chart
-    so a dropped finding never gets a chart or reaches synthesis."""
+    so a dropped finding never gets a chart or reaches synthesis.
+
+    Runs the deterministic significance gate first (agent.agents.significance)
+    — a non-LLM check that annotates, never drops, findings resting on too
+    few rows or a weak correlation — so both the LLM pass below and the
+    Synthesizer afterward see which findings need a hedge."""
+    state["findings"] = flag_low_confidence_findings(state["findings"])
     findings = state["findings"]
     if not findings:
         review = CriticReview(kept=0, dropped=0, reasons=[])
@@ -100,6 +111,7 @@ def review_findings(state: AnalysisState, tracker: CostTracker, model: str) -> C
         tracker=tracker,
         model=model,
         max_tokens=1024,
+        stage="critic_findings",
     )
 
     try:
@@ -133,7 +145,10 @@ def review_narrative(state: AnalysisState, tracker: CostTracker, model: str) -> 
     if not state["narrative_summary"]:
         return {"grounded_score": None, "non_obvious_score": None, "actionable": None, "reasoning": "no narrative to score"}
 
-    schema_json = json.dumps(state["dataset_schema"], default=str)[:4000]
+    schema_json = format_data_block(
+        "dataset schema (dtypes, null %, cardinality, date ranges, top categorical values)",
+        state["dataset_schema"],
+    )
     findings_json = json.dumps(state["findings"], default=str)[:6000]
     cleaning_actions_json = json.dumps(state["cleaning_actions_taken"], default=str)[:2000]
     resp = call_llm(
@@ -147,6 +162,7 @@ def review_narrative(state: AnalysisState, tracker: CostTracker, model: str) -> 
         tracker=tracker,
         model=model,
         max_tokens=512,
+        stage="critic_narrative",
     )
 
     try:

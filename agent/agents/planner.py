@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 
 from agent.llm import CostTracker, call_llm, extract_json
+from agent.stages.common import format_data_block
 from agent.state import AnalysisState, PlannedStep
 
 _SUGGEST_SYSTEM = """You are a planning agent for a data analysis pipeline. Given only a dataset's
@@ -59,14 +60,14 @@ Aim for 1-4 cleaning steps and 3-6 exploration steps. Fewer, well-justified step
 the list.
 """
 
-_USER_TEMPLATE = """Dataset schema (dtypes, null %, cardinality, aggregated stats only — no raw rows):
-{profile_json}
+_SCHEMA_LABEL = "dataset schema (dtypes, null %, cardinality, aggregated stats only, no raw rows)"
+
+_USER_TEMPLATE = """{profile_json}
 """
 
 _USER_TEMPLATE_WITH_GOAL = """What the user wants to know from this dataset:
 {user_goal}
 
-Dataset schema (dtypes, null %, cardinality, aggregated stats only — no raw rows):
 {profile_json}
 """
 
@@ -75,13 +76,14 @@ def suggest_questions(state: AnalysisState, tracker: CostTracker, model: str) ->
     """Schema-aware starting points for the human-in-the-loop intent gate —
     what this specific dataset could answer, so the human picks from real
     options instead of facing an empty text box."""
-    profile_json = json.dumps(state["dataset_schema"], default=str)[:6000]
+    profile_json = format_data_block(_SCHEMA_LABEL, state["dataset_schema"], max_chars=6000)
     resp = call_llm(
         system=_SUGGEST_SYSTEM,
         user_message=_USER_TEMPLATE.format(profile_json=profile_json),
         tracker=tracker,
         model=model,
         max_tokens=512,
+        stage="suggest",
     )
     try:
         parsed = extract_json(resp.text)
@@ -93,14 +95,14 @@ def suggest_questions(state: AnalysisState, tracker: CostTracker, model: str) ->
 
 
 def plan(state: AnalysisState, tracker: CostTracker, model: str) -> list[PlannedStep]:
-    profile_json = json.dumps(state["dataset_schema"], default=str)[:6000]
+    profile_json = format_data_block(_SCHEMA_LABEL, state["dataset_schema"], max_chars=6000)
     user_goal = state.get("user_goal", "").strip()
     if user_goal:
         user_message = _USER_TEMPLATE_WITH_GOAL.format(user_goal=user_goal[:2000], profile_json=profile_json)
     else:
         user_message = _USER_TEMPLATE.format(profile_json=profile_json)
 
-    resp = call_llm(system=_SYSTEM, user_message=user_message, tracker=tracker, model=model, max_tokens=1024)
+    resp = call_llm(system=_SYSTEM, user_message=user_message, tracker=tracker, model=model, max_tokens=1024, stage="plan")
 
     try:
         parsed = extract_json(resp.text)

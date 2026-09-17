@@ -184,6 +184,8 @@ elif st.session_state.result is not None:
     with st.expander(f"Findings ({len(state['findings'])})"):
         for f in state["findings"]:
             st.write(f"**[{f['kind']}]** {f['description']}")
+            if f.get("caveat"):
+                st.caption(f"⚠️ {f['caveat']}")
             if f["stats"]:
                 st.json(f["stats"])
 
@@ -206,6 +208,11 @@ elif st.session_state.result is not None:
             "stage_timings_s": {k: round(v, 2) for k, v in state["stage_timings_s"].items()},
         }
     )
+    if state.get("run_id"):
+        st.caption(
+            f"Run ID: `{state['run_id']}` — full trace (every prompt, response, and sandbox "
+            f"execution) at `outputs/runs/{state['run_id']}.jsonl` for debugging a specific run."
+        )
 
 elif st.session_state.checkpoint is not None and not st.session_state.goal_set:
     # ----- Stage 2: intent gate — what does the human actually want to know? -----

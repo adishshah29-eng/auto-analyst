@@ -21,6 +21,7 @@ class Finding(TypedDict):
     kind: str  # e.g. "distribution", "correlation", "outlier", "groupby"
     description: str
     stats: dict[str, Any]
+    caveat: str  # non-empty when agent.agents.significance flags low n / weak effect size; "" otherwise
 
 
 class CriticReview(TypedDict):
@@ -45,6 +46,7 @@ class CodeStep(TypedDict):
 
 class AnalysisState(TypedDict):
     dataset_name: str
+    run_id: str  # ties this run to its outputs/runs/<run_id>.jsonl trace file, see agent.tracing
     dataset_schema: dict[str, Any]
     suggested_questions: list[str]  # Planner's schema-aware starting points for the human to pick from
     user_goal: str  # what the human actually wants to know; steers explore, chart, and synthesis
@@ -62,9 +64,10 @@ class AnalysisState(TypedDict):
     narrative_summary: str
 
 
-def new_state(dataset_name: str) -> AnalysisState:
+def new_state(dataset_name: str, run_id: str = "") -> AnalysisState:
     return AnalysisState(
         dataset_name=dataset_name,
+        run_id=run_id,
         dataset_schema={},
         suggested_questions=[],
         user_goal="",

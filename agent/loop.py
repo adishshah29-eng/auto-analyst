@@ -31,6 +31,7 @@ from agent.agents import critic, planner
 from agent.llm import DEFAULT_MODEL, BudgetExceededError, CostTracker
 from agent.stages import chart, clean, explore, load_profile, synthesize
 from agent.state import AnalysisState, StageTimer, new_state
+from agent.tracing import RunTracer
 
 ProgressCallback = Callable[[str, str], None]  # (stage_name, message) -> None
 
@@ -75,8 +76,9 @@ def profile_and_suggest(
     caller (eval, MCP, tests) is a wasted LLM call and wasted latency."""
     os.makedirs(chart_dir, exist_ok=True)
     name = dataset_name or os.path.basename(dataset_path)
-    state = new_state(name)
-    tracker = CostTracker(budget_usd=budget_usd)
+    tracer = RunTracer(dataset_name=name)
+    state = new_state(name, run_id=tracer.run_id)
+    tracker = CostTracker(budget_usd=budget_usd, tracer=tracer)
 
     def notify(stage: str, msg: str) -> None:
         if on_progress:
@@ -85,15 +87,19 @@ def profile_and_suggest(
     df = load_profile.load_dataset(dataset_path)
 
     with StageTimer(state, "load_profile"):
+        tracer.log_stage_boundary("load_profile", "start")
         notify("load_profile", f"Loaded {df.shape[0]} rows x {df.shape[1]} cols. Profiling schema...")
         load_profile.run(state, df)
     notify("load_profile", "Profile complete.")
+    tracer.log_stage_boundary("load_profile", "end")
 
     if suggest:
         with StageTimer(state, "suggest"):
+            tracer.log_stage_boundary("suggest", "start")
             notify("suggest", "Planner is working out what this dataset can answer...")
             state["suggested_questions"] = planner.suggest_questions(state, tracker, model)
         notify("suggest", f"{len(state['suggested_questions'])} question(s) suggested.")
+        tracer.log_stage_boundary("suggest", "end")
 
     return PlanCheckpoint(state=state, df=df, tracker=tracker, chart_dir=chart_dir, model=model)
 
@@ -113,8 +119,11 @@ def make_plan(
             on_progress(stage, msg)
 
     state["user_goal"] = user_goal.strip()
+    tracer = tracker.tracer
 
     with StageTimer(state, "plan"):
+        if tracer is not None:
+            tracer.log_stage_boundary("plan", "start")
         notify(
             "plan",
             "Planner is building a plan to answer your question..."
@@ -127,6 +136,8 @@ def make_plan(
         f"Plan ready: {len(planner.cleaning_steps(state['plan']))} cleaning step(s), "
         f"{len(planner.exploration_steps(state['plan']))} exploration step(s).",
     )
+    if tracer is not None:
+        tracer.log_stage_boundary("plan", "end")
 
     return checkpoint
 
@@ -174,43 +185,59 @@ def execute_analysis(
     # care about trustworthy eval numbers (see eval/run_eval.py --judge-model)
     # can point this at a different, stronger model.
     judge_model = judge_model or model
+    tracer = tracker.tracer
 
     def notify(stage: str, msg: str) -> None:
         if on_progress:
             on_progress(stage, msg)
+
+    def trace(stage: str, event: str) -> None:
+        if tracer is not None:
+            tracer.log_stage_boundary(stage, event)
 
     cleaning_plan = planner.cleaning_steps(state["plan"])
     exploration_plan = planner.exploration_steps(state["plan"])
 
     try:
         with StageTimer(state, "clean"):
+            trace("clean", "start")
             notify("clean", "Executor is implementing the approved cleaning steps...")
             df = clean.run(state, df, tracker, model, planned_steps=cleaning_plan)
         notify("clean", f"Cleaning done: {len(state['cleaning_actions_taken'])} action(s) taken.")
+        trace("clean", "end")
 
         with StageTimer(state, "explore"):
+            trace("explore", "start")
             notify("explore", "Executor is computing the planned analyses...")
             explore.run(state, df, tracker, model, planned_steps=exploration_plan)
         notify("explore", f"Exploration done: {len(state['findings'])} finding(s).")
+        trace("explore", "end")
 
         if run_critic and state["findings"]:
             with StageTimer(state, "critic"):
+                trace("critic", "start")
                 notify("critic", "Critic is reviewing findings for quality before charting...")
                 review = critic.review_findings(state, tracker, model)
             notify("critic", f"Critic kept {review['kept']}, dropped {review['dropped']} finding(s).")
+            trace("critic", "end")
 
         with StageTimer(state, "chart"):
+            trace("chart", "start")
             notify("chart", "Executor is selecting and generating charts...")
             chart.run(state, df, tracker, model, chart_dir)
         notify("chart", f"Charting done: {len(state['charts_generated'])} chart(s) generated.")
+        trace("chart", "end")
 
         with StageTimer(state, "synthesize"):
+            trace("synthesize", "start")
             notify("synthesize", "Synthesizer is writing the final insight summary...")
             synthesize.run(state, tracker, model)
         notify("synthesize", "Summary complete.")
+        trace("synthesize", "end")
 
         if run_critic and state["narrative_summary"]:
             with StageTimer(state, "judge"):
+                trace("judge", "start")
                 notify("judge", "Critic is scoring the narrative for groundedness and relevance...")
                 state["narrative_review"] = critic.review_narrative(state, tracker, judge_model)
             nr = state["narrative_review"]
@@ -218,6 +245,7 @@ def execute_analysis(
                 "judge",
                 f"Judge scores — grounded: {nr['grounded_score']}/5, non-obvious: {nr['non_obvious_score']}/5.",
             )
+            trace("judge", "end")
 
     except BudgetExceededError as e:
         notify("budget", str(e))

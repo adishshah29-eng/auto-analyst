@@ -1,0 +1,26 @@
+name: Tests
+
+# All 21 tests in tests/ are mocked (every LLM call is a canned response) —
+# no ANTHROPIC_API_KEY / GOOGLE_API_KEY / secrets needed. This checks the
+# orchestration logic (sandbox isolation, the 4-agent pipeline wiring, the
+# significance gate) on every push and PR; eval/run_eval.py (which drives
+# the real model) stays a manual, local step — see README "Evaluation Plan".
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run test suite
+        run: pytest tests/ -v

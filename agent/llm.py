@@ -17,6 +17,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from typing import Any
 
 DEFAULT_MODEL = os.environ.get("ANALYSIS_MODEL", "claude-sonnet-5")
 
@@ -55,13 +56,18 @@ class LLMResponse:
 
 
 class CostTracker:
-    """Accumulates spend across a whole analysis run and enforces a ceiling."""
+    """Accumulates spend across a whole analysis run and enforces a ceiling.
 
-    def __init__(self, budget_usd: float | None = None):
+    Optionally carries a RunTracer (agent.tracing) so call_llm() can log
+    every LLM call against the same run_id this tracker is already threaded
+    through — no new parameter needed at any of the ~10 call sites."""
+
+    def __init__(self, budget_usd: float | None = None, tracer: Any | None = None):
         self.budget_usd = budget_usd
         self.total_cost_usd = 0.0
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        self.tracer = tracer
 
     def add(self, cost_usd: float, input_tokens: int, output_tokens: int) -> None:
         self.total_cost_usd += cost_usd
@@ -170,9 +176,14 @@ def call_llm(
     model: str = DEFAULT_MODEL,
     max_tokens: int = 2048,
     temperature: float = 0.2,
+    stage: str = "",
 ) -> LLMResponse:
     """One model call, metered. Raises BudgetExceededError up front if the
-    tracker already reports the ceiling as spent."""
+    tracker already reports the ceiling as spent.
+
+    `stage` is purely a tracing label (e.g. "plan", "explore", "synthesize")
+    — it has no effect on the call itself. Passed through to tracker.tracer
+    if one is attached, so a run's trace file can be read stage-by-stage."""
     if tracker is not None:
         tracker.check_budget()
 
@@ -190,6 +201,17 @@ def call_llm(
     if tracker is not None:
         tracker.add(cost, input_tokens, output_tokens)
         tracker.check_budget()
+        if tracker.tracer is not None:
+            tracker.tracer.log_llm_call(
+                stage=stage,
+                model=model,
+                system=system,
+                user_message=user_message,
+                response_text=text,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost,
+            )
 
     return LLMResponse(text=text, input_tokens=input_tokens, output_tokens=output_tokens, cost_usd=cost)
 

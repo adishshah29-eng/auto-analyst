@@ -22,6 +22,11 @@ number, percentage, or statistic that does not appear in that JSON. If the JSON'
 is empty or very sparse, say plainly that the automated analysis did not produce enough findings
 to summarize, rather than inventing plausible-sounding numbers to fill out the narrative.
 
+If a finding in the JSON carries a non-empty "caveat" (e.g. a small sample size or a weak
+correlation, flagged by a deterministic check, not an opinion), hedge that finding in the
+narrative ("in a small subgroup...", "a weak signal...") rather than stating it as a firm
+conclusion — the number is real, but the caveat means it shouldn't be presented as one.
+
 If the JSON has a non-empty "user_goal", that is the question the reader actually asked. ANSWER IT
 DIRECTLY IN THE FIRST SENTENCE, with the specific numbers, before anything else. If the findings
 don't actually answer it, say so plainly in that first sentence ("The analysis can't answer X
@@ -63,7 +68,7 @@ def run(state: AnalysisState, tracker: CostTracker, model: str) -> None:
         summary_json=json.dumps(summary, default=str)[:8000],
     )
 
-    resp = call_llm(system=_SYSTEM, user_message=user_message, tracker=tracker, model=model, max_tokens=1024)
+    resp = call_llm(system=_SYSTEM, user_message=user_message, tracker=tracker, model=model, max_tokens=1024, stage="synthesize")
 
     try:
         parsed = extract_json(resp.text)

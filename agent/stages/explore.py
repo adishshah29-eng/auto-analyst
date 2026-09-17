@@ -12,7 +12,9 @@ import pandas as pd
 
 from agent.llm import CostTracker
 from agent.state import AnalysisState
-from agent.stages.common import SANDBOX_SYSTEM_PREAMBLE, _run_with_retry
+from agent.stages.common import SANDBOX_SYSTEM_PREAMBLE, _run_with_retry, format_data_block
+
+_SCHEMA_LABEL = "dataset profile (schema + aggregated stats only, no raw rows)"
 
 _TASK_WITH_PLAN = """{goal_block}Compute EXACTLY the following approved analyses against `df` — one finding per
 planned item (skip an item only if the code genuinely can't produce it, e.g. a planned correlation
@@ -24,12 +26,16 @@ Build a Python list of dicts named `findings`, each shaped like:
 {{"kind": "distribution" | "correlation" | "outlier" | "groupby" | "other",
   "description": "<one plain-English sentence stating the finding, with the actual numbers>",
   "stats": {{...small dict of the supporting numbers...}}}}
+For "groupby", "correlation", and "outlier" findings, include "n" in stats — the number of rows
+the finding is based on (the subgroup size for a groupby, the number of paired observations for a
+correlation, the count for an outlier group) — a downstream check flags findings based on too few
+rows as low-confidence, and it can only do that if "n" is actually reported.
 Do not put any raw row-level data into `findings` — aggregated numbers only.
 
 Cleaning already applied: {cleaning_actions}
 
-Dataset profile (schema + aggregated stats only, no raw rows), for column names/dtypes only —
-the analysis decisions themselves are already made, use this just to write correct code:
+For column names/dtypes only — the analysis decisions themselves are already made, use this just
+to write correct code:
 {profile_json}
 """
 
@@ -47,12 +53,15 @@ Build a Python list of dicts named `findings`, each shaped like:
 {{"kind": "distribution" | "correlation" | "outlier" | "groupby" | "other",
   "description": "<one plain-English sentence stating the finding, with the actual numbers>",
   "stats": {{...small dict of the supporting numbers...}}}}
+For "groupby", "correlation", and "outlier" findings, include "n" in stats — the number of rows
+the finding is based on (the subgroup size for a groupby, the number of paired observations for a
+correlation, the count for an outlier group) — a downstream check flags findings based on too few
+rows as low-confidence, and it can only do that if "n" is actually reported.
 Only include findings that are actually notable (skip trivial/obvious ones). Aim for 3-8 findings.
 Do not put any raw row-level data into `findings` — aggregated numbers only.
 
 Cleaning already applied: {cleaning_actions}
 
-Dataset profile (schema + aggregated stats only, no raw rows):
 {profile_json}
 """
 
@@ -64,7 +73,7 @@ def run(
     model: str,
     planned_steps: list[str] | None = None,
 ) -> None:
-    profile_json = json.dumps(state["dataset_schema"], default=str)[:6000]
+    profile_json = format_data_block(_SCHEMA_LABEL, state["dataset_schema"], max_chars=6000)
     cleaning_actions = json.dumps(state["cleaning_actions_taken"][-10:])
     user_goal = state.get("user_goal", "").strip()
     goal_block = (
@@ -104,5 +113,6 @@ def run(
                         "kind": str(f.get("kind", "other")),
                         "description": str(f.get("description", "")),
                         "stats": f.get("stats", {}) if isinstance(f.get("stats"), dict) else {},
+                        "caveat": "",  # set later by agent.agents.significance if the stats warrant it
                     }
                 )

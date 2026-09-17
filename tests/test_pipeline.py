@@ -48,7 +48,7 @@ SYNTH_RESP = (
 JUDGE_RESP = '```json\n{"grounded_score": 5, "non_obvious_score": 3, "actionable": true, "reasoning": "grounded"}\n```'
 
 
-def _fake_call_llm(system, user_message, tracker=None, model=None, max_tokens=2048, temperature=0.2):
+def _fake_call_llm(system, user_message, tracker=None, model=None, max_tokens=2048, temperature=0.2, stage=""):
     if tracker is not None:
         tracker.add(0.0, 10, 5)
     if "Produce two lists" in system:
@@ -108,7 +108,7 @@ def test_timeout_retry_reuses_code_without_an_extra_llm_call():
 
     call_count = {"n": 0}
 
-    def fake_call_llm(system, user_message, tracker=None, model=None, max_tokens=2048, temperature=0.2):
+    def fake_call_llm(system, user_message, tracker=None, model=None, max_tokens=2048, temperature=0.2, stage=""):
         call_count["n"] += 1
         return LLMResponse(text="```python\nresult = 1 + 1\n```", input_tokens=10, output_tokens=5, cost_usd=0.0)
 
@@ -184,7 +184,7 @@ def test_user_goal_reaches_planner_explore_chart_and_synthesize_prompts():
     prompts: dict[str, str] = {}
 
     def capture(key):
-        def fake(system, user_message, tracker=None, model=None, max_tokens=2048, temperature=0.2):
+        def fake(system, user_message, tracker=None, model=None, max_tokens=2048, temperature=0.2, stage=""):
             prompts[key] = user_message
             # planner/synthesize parse JSON; explore/chart parse a code block
             if key in ("planner", "synthesize"):
@@ -235,7 +235,7 @@ def test_review_narrative_shows_the_judge_the_schema_too():
 
     captured = {}
 
-    def fake_call_llm(system, user_message, tracker=None, model=None, max_tokens=2048, temperature=0.2):
+    def fake_call_llm(system, user_message, tracker=None, model=None, max_tokens=2048, temperature=0.2, stage=""):
         captured["user_message"] = user_message
         return LLMResponse(
             text='```json\n{"grounded_score": 5, "non_obvious_score": 2, "actionable": false, "reasoning": "ok"}\n```',

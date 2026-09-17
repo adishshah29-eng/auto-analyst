@@ -12,7 +12,7 @@ import pandas as pd
 
 from agent.llm import CostTracker
 from agent.state import AnalysisState, ChartMeta
-from agent.stages.common import SANDBOX_SYSTEM_PREAMBLE, _run_with_retry
+from agent.stages.common import SANDBOX_SYSTEM_PREAMBLE, _run_with_retry, format_data_block
 
 _TASK = """{goal_block}Given the findings below, create the matplotlib chart(s) that best communicate them.
 Pick a chart type appropriate to each finding's content — for example:
@@ -32,13 +32,14 @@ SAME ORDER, shaped like: {{"chart_type": "histogram"|"scatter"|"bar"|"line"|"box
 Findings to visualize:
 {findings_json}
 
-Dataset profile (schema + aggregated stats only, no raw rows):
 {profile_json}
 """
 
 
 def run(state: AnalysisState, df: pd.DataFrame, tracker: CostTracker, model: str, chart_dir: str) -> None:
-    profile_json = json.dumps(state["dataset_schema"], default=str)[:4000]
+    profile_json = format_data_block(
+        "dataset profile (schema + aggregated stats only, no raw rows)", state["dataset_schema"]
+    )
     findings_json = json.dumps(state["findings"], default=str)[:4000]
     user_goal = state.get("user_goal", "").strip()
     goal_block = (
