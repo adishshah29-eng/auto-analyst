@@ -14,7 +14,7 @@ from agent.llm import CostTracker
 from agent.state import AnalysisState, ChartMeta
 from agent.stages.common import SANDBOX_SYSTEM_PREAMBLE, _run_with_retry
 
-_TASK = """Given the findings below, create the matplotlib chart(s) that best communicate them.
+_TASK = """{goal_block}Given the findings below, create the matplotlib chart(s) that best communicate them.
 Pick a chart type appropriate to each finding's content — for example:
 - a skewed/notable numeric distribution -> histogram
 - a flagged correlation between two numeric columns -> scatter plot
@@ -40,7 +40,15 @@ Dataset profile (schema + aggregated stats only, no raw rows):
 def run(state: AnalysisState, df: pd.DataFrame, tracker: CostTracker, model: str, chart_dir: str) -> None:
     profile_json = json.dumps(state["dataset_schema"], default=str)[:4000]
     findings_json = json.dumps(state["findings"], default=str)[:4000]
-    user_prompt = _TASK.format(findings_json=findings_json, profile_json=profile_json)
+    user_goal = state.get("user_goal", "").strip()
+    goal_block = (
+        f"The user asked: {user_goal[:2000]}\n"
+        "Chart what answers THAT question first — the chart that most directly shows their answer "
+        "comes first, and skip findings that don't help answer it even if they'd visualize nicely.\n\n"
+        if user_goal
+        else ""
+    )
+    user_prompt = _TASK.format(goal_block=goal_block, findings_json=findings_json, profile_json=profile_json)
 
     result, _ = _run_with_retry(
         system=SANDBOX_SYSTEM_PREAMBLE,

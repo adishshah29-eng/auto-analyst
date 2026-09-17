@@ -56,14 +56,23 @@ class AnalysisRunResult:
     stopped_early: str | None = None  # reason, if a budget ceiling cut the run short
 
 
-def plan_analysis(
+def profile_and_suggest(
     dataset_path: str,
     dataset_name: str | None = None,
     model: str = DEFAULT_MODEL,
     budget_usd: float | None = None,
     chart_dir: str = "outputs/charts",
     on_progress: ProgressCallback | None = None,
+    suggest: bool = True,
 ) -> PlanCheckpoint:
+    """First half of planning: load, profile, and ask the Planner what
+    questions this dataset could answer. Returns before any plan exists —
+    the intent gate in app.py shows those suggestions, takes the human's
+    answer, and passes it to make_plan().
+
+    `suggest=False` skips the suggestion call entirely: it only exists to
+    populate a human-facing picker, so generating it for a non-interactive
+    caller (eval, MCP, tests) is a wasted LLM call and wasted latency."""
     os.makedirs(chart_dir, exist_ok=True)
     name = dataset_name or os.path.basename(dataset_path)
     state = new_state(name)
@@ -80,8 +89,38 @@ def plan_analysis(
         load_profile.run(state, df)
     notify("load_profile", "Profile complete.")
 
+    if suggest:
+        with StageTimer(state, "suggest"):
+            notify("suggest", "Planner is working out what this dataset can answer...")
+            state["suggested_questions"] = planner.suggest_questions(state, tracker, model)
+        notify("suggest", f"{len(state['suggested_questions'])} question(s) suggested.")
+
+    return PlanCheckpoint(state=state, df=df, tracker=tracker, chart_dir=chart_dir, model=model)
+
+
+def make_plan(
+    checkpoint: PlanCheckpoint,
+    user_goal: str = "",
+    on_progress: ProgressCallback | None = None,
+) -> PlanCheckpoint:
+    """Second half of planning: turn the human's stated goal (empty string =
+    "just analyze it") plus the schema into a concrete plan. Mutates and
+    returns the same checkpoint."""
+    state, tracker, model = checkpoint.state, checkpoint.tracker, checkpoint.model
+
+    def notify(stage: str, msg: str) -> None:
+        if on_progress:
+            on_progress(stage, msg)
+
+    state["user_goal"] = user_goal.strip()
+
     with StageTimer(state, "plan"):
-        notify("plan", "Planner is deciding what cleaning and analysis steps to take...")
+        notify(
+            "plan",
+            "Planner is building a plan to answer your question..."
+            if state["user_goal"]
+            else "Planner is deciding what cleaning and analysis steps to take...",
+        )
         state["plan"] = planner.plan(state, tracker, model)
     notify(
         "plan",
@@ -89,7 +128,30 @@ def plan_analysis(
         f"{len(planner.exploration_steps(state['plan']))} exploration step(s).",
     )
 
-    return PlanCheckpoint(state=state, df=df, tracker=tracker, chart_dir=chart_dir, model=model)
+    return checkpoint
+
+
+def plan_analysis(
+    dataset_path: str,
+    dataset_name: str | None = None,
+    model: str = DEFAULT_MODEL,
+    budget_usd: float | None = None,
+    chart_dir: str = "outputs/charts",
+    on_progress: ProgressCallback | None = None,
+    user_goal: str = "",
+) -> PlanCheckpoint:
+    """Both halves in one call, for non-interactive callers that already
+    know the goal (or have none): eval harness, MCP server, tests."""
+    checkpoint = profile_and_suggest(
+        dataset_path=dataset_path,
+        dataset_name=dataset_name,
+        model=model,
+        budget_usd=budget_usd,
+        chart_dir=chart_dir,
+        on_progress=on_progress,
+        suggest=False,  # nobody reads suggestions on this path — don't pay for them
+    )
+    return make_plan(checkpoint, user_goal=user_goal, on_progress=on_progress)
 
 
 def execute_analysis(
@@ -173,9 +235,13 @@ def run_analysis(
     on_progress: ProgressCallback | None = None,
     run_critic: bool = True,
     judge_model: str | None = None,
+    user_goal: str = "",
 ) -> AnalysisRunResult:
     """Convenience wrapper for non-interactive callers (eval harness, MCP
-    server, tests): plan then immediately execute with no human review."""
+    server, tests): plan then immediately execute with no human review.
+    `user_goal` is the same steering the UI's intent gate provides — an MCP
+    caller passing a question gets the same goal-directed behavior a human
+    typing one into the app does."""
     checkpoint = plan_analysis(
         dataset_path=dataset_path,
         dataset_name=dataset_name,
@@ -183,5 +249,6 @@ def run_analysis(
         budget_usd=budget_usd,
         chart_dir=chart_dir,
         on_progress=on_progress,
+        user_goal=user_goal,
     )
     return execute_analysis(checkpoint, on_progress=on_progress, run_critic=run_critic, judge_model=judge_model)

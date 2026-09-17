@@ -14,7 +14,7 @@ from agent.llm import CostTracker
 from agent.state import AnalysisState
 from agent.stages.common import SANDBOX_SYSTEM_PREAMBLE, _run_with_retry
 
-_TASK_WITH_PLAN = """Compute EXACTLY the following approved analyses against `df` — one finding per
+_TASK_WITH_PLAN = """{goal_block}Compute EXACTLY the following approved analyses against `df` — one finding per
 planned item (skip an item only if the code genuinely can't produce it, e.g. a planned correlation
 against a column that turned out to be constant):
 
@@ -66,11 +66,17 @@ def run(
 ) -> None:
     profile_json = json.dumps(state["dataset_schema"], default=str)[:6000]
     cleaning_actions = json.dumps(state["cleaning_actions_taken"][-10:])
+    user_goal = state.get("user_goal", "").strip()
+    goal_block = (
+        f"The user wants to know: {user_goal[:2000]}\nEvery finding you produce should help answer that.\n\n"
+        if user_goal
+        else ""
+    )
 
     if planned_steps:
         plan_text = "\n".join(f"- {s}" for s in planned_steps)
         user_prompt = _TASK_WITH_PLAN.format(
-            plan_text=plan_text, profile_json=profile_json, cleaning_actions=cleaning_actions
+            goal_block=goal_block, plan_text=plan_text, profile_json=profile_json, cleaning_actions=cleaning_actions
         )
     else:
         user_prompt = _TASK_NO_PLAN.format(profile_json=profile_json, cleaning_actions=cleaning_actions)

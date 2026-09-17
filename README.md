@@ -4,7 +4,7 @@ Upload any CSV you've never shown it before, and four agents — **Planner, Exec
 
 ## Demo
 
-Run `streamlit run app.py`, upload one of the datasets in `eval/test_datasets/` (a Titanic-like passenger set, a retail sales log, a CRM leads/deals export — three different shapes, same pipeline, no per-dataset code). The Planner proposes a plan first — review or edit the cleaning steps, then approve to let Executor → Critic → Synthesizer run, with charts and the summary rendered below alongside the Critic's judge score. Or skip the browser and call it directly via MCP — see "MCP Server" below.
+Run `streamlit run app.py`, upload one of the datasets in `eval/test_datasets/` (a Titanic-like passenger set, a retail sales log, a CRM leads/deals export — three different shapes, same pipeline, no per-dataset code). It profiles the file, then **asks what you want to know** — offering concrete questions your schema can actually answer, plus a box to write your own. Pick, review the plan it builds to answer that, approve, and Executor → Critic → Synthesizer run, with charts and a summary that answers your question in its first sentence, alongside the Critic's judge score. Or skip the browser and call it via MCP with a `question` argument — see "MCP Server" below.
 
 ## Why CodeAct (not fixed tools)
 
@@ -13,15 +13,15 @@ A beginner version of this hardcodes `load_csv()` / `make_bar_chart()` style too
 ## Pipeline: four agents, not one
 
 ```
-Planner → Executor (Clean) → Executor (Explore) → Critic (findings) → Executor (Chart) → Synthesizer → Critic (narrative)
-              ↑
-     [human review gate]
+Profile → [human: what do you want to know?] → Planner → [human: review plan]
+   → Executor (Clean) → Executor (Explore) → Critic (findings)
+   → Executor (Chart) → Synthesizer → Critic (narrative)
 ```
 
 Splitting "decide what's worth doing" from "write the code for it" from "check whether the output is any good" gives each LLM call one job instead of several — and gives the human-in-the-loop gate something worth reading (a plan is legible in a way generated pandas code isn't).
 
 0. **Load & Profile** (`agent/stages/load_profile.py`) — reads the file and profiles it by dtype: shape, null counts, cardinality, numeric stats, top categorical values, inferred datetime columns. Deliberately *not* LLM-generated — profiling by dtype is mechanical, has no judgment calls, and running our own trusted code here means one less place for things to go wrong before the agent has any context to reason about.
-1. **Planner** (`agent/agents/planner.py`) — one LLM call, given only the schema. Decides *what* to do, in plain English, no code yet: which cleaning steps this schema actually needs (not a fixed checklist — skips imputation for a 0%-null column, skips deduplication with no evidence of duplicates) and which exploratory analyses are worth running. This plan is what the **human-in-the-loop gate** shows for review (see below) — before any code has been written or executed.
+1. **Planner** (`agent/agents/planner.py`) — two jobs, both schema-only, no code. `suggest_questions()` proposes concrete questions this dataset can answer, for the **intent gate** to show the human. `plan()` then turns their answer (or no answer) into a plan: which cleaning steps this schema actually needs (not a fixed checklist — skips imputation for a 0%-null column, skips deduplication with no evidence of duplicates) and which analyses to run — where "worth running" means *serves the stated goal* when there is one. That plan is what the **plan-review gate** shows before any code is written or executed.
 2. **Executor — Clean** (`agent/stages/clean.py`) — implements the *approved* cleaning steps (a human may have edited them). This stage's job is now HOW, not WHAT.
 3. **Executor — Explore** (`agent/stages/explore.py`) — computes exactly the planned analyses (distributions, correlations, outliers, group-bys), producing a structured findings list.
 4. **Critic — findings** (`agent/agents/critic.py`) — reviews the findings *before* they reach a chart or the narrative, and actually **drops** ones that are trivial ("there are 500 rows"), ungrounded (calls a correlation "strong" when the stat is near zero), or duplicate. This is a real filter, not a logged opinion — mutates the findings list in place. Runs between Explore and Chart so a dropped finding never gets charted.
@@ -31,11 +31,23 @@ Splitting "decide what's worth doing" from "write the code for it" from "check w
 
 Stages 2, 3, and 5 all go through the same generate → execute → self-correct loop (`agent/stages/common.py`): generate code, run it in the sandbox, and if it errors, feed the traceback back to the model for one corrective retry before giving up and recording the failure.
 
-`agent/loop.py` exposes this as two entry points, not one: `plan_analysis()` runs stage 0-1 and stops (the checkpoint the human-in-the-loop gate reviews), `execute_analysis()` resumes from there through the rest, and `run_analysis()` is a convenience wrapper that does both with no human in the loop (what the eval harness and MCP server use).
+`agent/loop.py` exposes this as resumable pieces rather than one call, so the two human gates can sit between them: `profile_and_suggest()` → `make_plan(checkpoint, user_goal)` → `execute_analysis(checkpoint)`. `plan_analysis()` collapses the first two and `run_analysis(..., user_goal=...)` collapses all three, for non-interactive callers (eval harness, MCP server, tests) — those skip the suggestion call entirely, since it exists only to populate a human-facing picker.
 
 ## Human-in-the-Loop
 
-The Planner's plan — not generated code — is the review point (`app.py`'s plan-review screen, backed by `plan_analysis()`/`execute_analysis()` in `agent/loop.py`). Reviewing "impute missing Age with median; drop 5 duplicate rows" is something a non-technical user can actually evaluate in two seconds; reviewing the pandas code that implements it is not. The cleaning steps render in an editable text box — edit a line, delete a line to skip it, or click "Skip cleaning entirely" — and nothing executes until "Approve & run." Exploration steps are shown read-only (informational, since they're non-destructive by nature — they only read `df`, never mutate it). Verified end-to-end with a real browser session (Playwright) against live Gemini: upload → real plan appears → edited/approved → Executor → Critic → Synthesizer run → results with the judge score all render correctly.
+Two gates, in the order that matters to a human:
+
+**1. Intent — "What do you want to know?"** After profiling (deterministic, no LLM), the Planner proposes 4-6 concrete questions *this* schema can answer — naming real columns, not "what are the trends?" — and the human ticks the ones they care about and/or writes their own. That goal then steers the Planner's analysis steps, which findings the Explorer computes, which charts get made, and the Synthesizer's first sentence (which must answer the question directly, or say plainly that the data can't). "Skip — just analyze it" keeps the zero-input path.
+
+This gate exists because the first version of this feature gated the wrong thing. It let a human approve *cleaning* — the step they care least about — while giving them no say over the output. Asking what they actually want is the version worth a human's attention; gating null-imputation strategy is not.
+
+Intent is taken in words, not chart-type dropdowns, deliberately: a dropdown would be fiddly on mobile and would bypass the thing that makes the chart stage interesting — reasoning about which chart form fits the content. The human's words set the target; the agent still picks the form.
+
+**2. Plan review.** The Planner's plan — not generated code — is the second review point. "Impute missing Age with median; drop 5 duplicate rows" is evaluable in two seconds; the pandas that implements it is not. Analysis steps and cleaning steps both render in editable text boxes (edit a line, delete one to skip it), analysis first since that's what the goal shaped. Nothing executes until "Approve & run."
+
+`agent/loop.py` splits planning to make this possible: `profile_and_suggest()` stops after profiling with suggested questions, `make_plan(checkpoint, user_goal)` turns the answer into a plan, `execute_analysis()` runs the rest. `run_analysis(..., user_goal=...)` does all of it in one call for non-interactive callers — so an MCP client passing `question=` gets exactly the same goal-directed behavior a human typing one into the app does.
+
+Verified end-to-end in a real browser (Playwright) against live Gemini: upload → schema-specific questions appear → tick one + type a custom one → plan echoes the combined goal → approve → the summary's first sentence answers *both*. On `leads_deals.csv`, asking "which sales rep is performing best, and should I be worried about any of them?" produced four planned steps all about rep performance, four charts all answering facets of it, and the opening line *"L. Fischer is performing best in total deal value ($756,164.57 across 77 deals), but you should be worried because they have the lowest win conversion rate at 21.9%"* — versus the generic lead-source/industry findings the same dataset produces with no goal set.
 
 ## Sandbox & Security
 
@@ -96,7 +108,7 @@ A model judging its own output is weaker evidence than an independent judge (it'
 
 ## MCP Server
 
-`mcp_server.py` wraps the whole pipeline as one MCP tool, `analyze_dataset(file_path, model, budget_usd)`, so any MCP-aware client — Claude Desktop, Claude Code, another agent — can call it directly, no browser involved. It's a thin adapter: calls `agent.loop.run_analysis()` exactly like `app.py` does, no duplicated pipeline logic. Charts come back as inline image content blocks (most clients render them directly in the conversation), and the narrative + findings as a text block.
+`mcp_server.py` wraps the whole pipeline as one MCP tool, `analyze_dataset(file_path, question, model, budget_usd)` — pass `question` to get the same goal-directed analysis the app's intent gate provides — so any MCP-aware client — Claude Desktop, Claude Code, another agent — can call it directly, no browser involved. It's a thin adapter: calls `agent.loop.run_analysis()` exactly like `app.py` does, no duplicated pipeline logic. Charts come back as inline image content blocks (most clients render them directly in the conversation), and the narrative + findings as a text block.
 
 Test it locally with the SDK's dev inspector:
 ```bash

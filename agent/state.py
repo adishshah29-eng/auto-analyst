@@ -46,6 +46,8 @@ class CodeStep(TypedDict):
 class AnalysisState(TypedDict):
     dataset_name: str
     dataset_schema: dict[str, Any]
+    suggested_questions: list[str]  # Planner's schema-aware starting points for the human to pick from
+    user_goal: str  # what the human actually wants to know; steers explore, chart, and synthesis
     plan: list[PlannedStep]  # from the Planner agent; empty until planned
     plan_approved: bool  # False while awaiting human review (HITL gate)
     cleaning_actions_taken: list[str]
@@ -64,6 +66,8 @@ def new_state(dataset_name: str) -> AnalysisState:
     return AnalysisState(
         dataset_name=dataset_name,
         dataset_schema={},
+        suggested_questions=[],
+        user_goal="",
         plan=[],
         plan_approved=False,
         cleaning_actions_taken=[],
@@ -114,6 +118,7 @@ def summarize_for_prompt(state: AnalysisState, max_findings: int = 15, max_chart
     and any raw dataframe values.
     """
     return {
+        "user_goal": state["user_goal"],
         "dataset_schema": state["dataset_schema"],
         "cleaning_actions_taken": state["cleaning_actions_taken"],
         "findings": state["findings"][-max_findings:],

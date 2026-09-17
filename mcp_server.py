@@ -44,7 +44,9 @@ server = FastMCP(
 
 
 @server.tool()
-def analyze_dataset(file_path: str, model: str = DEFAULT_MODEL, budget_usd: float = 1.0) -> list:
+def analyze_dataset(
+    file_path: str, question: str = "", model: str = DEFAULT_MODEL, budget_usd: float = 1.0
+) -> list:
     # Untyped `list` return, deliberately: annotating this as list[str |
     # Image] makes FastMCP try to build a pydantic output schema from the
     # annotation, and Image (a content-conversion marker, not a schema
@@ -57,6 +59,11 @@ def analyze_dataset(file_path: str, model: str = DEFAULT_MODEL, budget_usd: floa
 
     Args:
         file_path: absolute path to a local .csv, .json, .xlsx, or .xls file.
+        question: what you want to know from this data, in plain English
+            (e.g. "which city has the highest average fare, and is it
+            rising?"). Steers which analyses run, which charts get made,
+            and makes the summary answer this directly. Omit it to let the
+            agent decide what's interesting on its own.
         model: which model to use (any Claude or Gemini model id). Defaults
             to the server's configured ANALYSIS_MODEL.
         budget_usd: stop the run early if estimated LLM cost exceeds this.
@@ -64,10 +71,14 @@ def analyze_dataset(file_path: str, model: str = DEFAULT_MODEL, budget_usd: floa
     if not os.path.isfile(file_path):
         return [f"Error: '{file_path}' is not a file the server can read."]
 
-    result = run_analysis(dataset_path=file_path, model=model, budget_usd=budget_usd)
+    result = run_analysis(
+        dataset_path=file_path, model=model, budget_usd=budget_usd, user_goal=question
+    )
     state = result.state
 
     lines = [f"# Analysis of {state['dataset_name']}", ""]
+    if state["user_goal"]:
+        lines += [f"**Question asked:** {state['user_goal']}", ""]
 
     if result.stopped_early:
         lines.append(f"**Run stopped early:** {result.stopped_early}")

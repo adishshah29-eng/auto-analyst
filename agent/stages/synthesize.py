@@ -22,6 +22,12 @@ number, percentage, or statistic that does not appear in that JSON. If the JSON'
 is empty or very sparse, say plainly that the automated analysis did not produce enough findings
 to summarize, rather than inventing plausible-sounding numbers to fill out the narrative.
 
+If the JSON has a non-empty "user_goal", that is the question the reader actually asked. ANSWER IT
+DIRECTLY IN THE FIRST SENTENCE, with the specific numbers, before anything else. If the findings
+don't actually answer it, say so plainly in that first sentence ("The analysis can't answer X
+because...") rather than burying it or quietly answering a different question. Everything after
+that first sentence is supporting context.
+
 Respond with a single ```json code block containing:
 {"narrative": "<3-6 sentence plain-English summary, prose>",
  "non_obvious_findings": ["<finding 1 as a short standalone sentence>", "..."]}

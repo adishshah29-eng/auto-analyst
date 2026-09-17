@@ -171,6 +171,49 @@ def test_critic_fails_open_on_unparseable_response():
     assert len(state["findings"]) == 1
 
 
+def test_user_goal_reaches_planner_explore_chart_and_synthesize_prompts():
+    """The intent gate only means anything if the goal actually steers the
+    downstream stages. Asserts the goal text reaches all four prompts that
+    are supposed to act on it — a goal stored in state but never threaded
+    into a prompt would look fine in the UI and change nothing about the
+    output."""
+    from agent.agents import planner
+    from agent.stages import chart, explore, synthesize
+
+    goal = "WHICH-REP-IS-BEST-SENTINEL"
+    prompts: dict[str, str] = {}
+
+    def capture(key):
+        def fake(system, user_message, tracker=None, model=None, max_tokens=2048, temperature=0.2):
+            prompts[key] = user_message
+            # planner/synthesize parse JSON; explore/chart parse a code block
+            if key in ("planner", "synthesize"):
+                return LLMResponse(text='```json\n{}\n```', input_tokens=1, output_tokens=1, cost_usd=0.0)
+            return LLMResponse(text="```python\nfindings = []\n```", input_tokens=1, output_tokens=1, cost_usd=0.0)
+        return fake
+
+    state = new_state("goal_test")
+    state["dataset_schema"] = {"n_rows": 10, "columns": {}}
+    state["user_goal"] = goal
+    state["findings"] = [{"kind": "groupby", "description": "d", "stats": {}}]
+    state["narrative_summary"] = "n"
+    df = pd.DataFrame({"a": [1, 2, 3]})
+
+    with patch("agent.agents.planner.call_llm", side_effect=capture("planner")):
+        planner.plan(state, tracker=None, model="x")
+    with patch("agent.stages.common.call_llm", side_effect=capture("explore")), \
+         patch("agent.stages.common.run_sandboxed", return_value=SandboxResult(success=True, output_vars={})):
+        explore.run(state, df, tracker=None, model="x", planned_steps=["step one"])
+    with patch("agent.stages.common.call_llm", side_effect=capture("chart")), \
+         patch("agent.stages.common.run_sandboxed", return_value=SandboxResult(success=True, output_vars={})):
+        chart.run(state, df, tracker=None, model="x", chart_dir="/tmp")
+    with patch("agent.stages.synthesize.call_llm", side_effect=capture("synthesize")):
+        synthesize.run(state, tracker=None, model="x")
+
+    for stage in ("planner", "explore", "chart", "synthesize"):
+        assert goal in prompts[stage], f"user_goal never reached the {stage} prompt"
+
+
 def test_review_narrative_shows_the_judge_the_schema_too():
     """Regression test: review_narrative() originally only showed the judge
     `findings` + `cleaning_actions_taken`, so a narrative correctly citing a

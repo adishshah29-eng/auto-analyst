@@ -23,7 +23,7 @@ load_dotenv()
 
 from agent.agents import planner  # noqa: E402
 from agent.llm import DEFAULT_MODEL, infer_provider  # noqa: E402
-from agent.loop import execute_analysis, plan_analysis  # noqa: E402
+from agent.loop import execute_analysis, make_plan, profile_and_suggest  # noqa: E402
 from agent.state import PlannedStep  # noqa: E402
 
 
@@ -56,6 +56,7 @@ st.set_page_config(page_title="Autonomous Data Analysis Agent", layout="wide")
 
 STAGE_LABELS = {
     "load_profile": "1. Load & Profile",
+    "suggest": "1b. Planner — suggesting questions",
     "plan": "2. Planner",
     "clean": "3. Executor — Clean",
     "explore": "4. Executor — Explore",
@@ -90,7 +91,9 @@ with st.sidebar:
     st.caption(f"Running commit: `{_running_commit_short()}` — compare with the latest on GitHub to check whether the deploy has picked up your last push.")
 
 if "checkpoint" not in st.session_state:
-    st.session_state.checkpoint = None  # PlanCheckpoint, set once planning completes
+    st.session_state.checkpoint = None  # PlanCheckpoint, set once profiling completes
+if "goal_set" not in st.session_state:
+    st.session_state.goal_set = False  # True once the human has answered the intent gate
 if "result" not in st.session_state:
     st.session_state.result = None  # AnalysisRunResult, set once execution completes
 if "elapsed_plan" not in st.session_state:
@@ -113,6 +116,7 @@ def _make_progress_renderer():
 
 def _reset() -> None:
     st.session_state.checkpoint = None
+    st.session_state.goal_set = False
     st.session_state.result = None
     st.session_state.elapsed_plan = 0.0
     st.session_state.elapsed_exec = 0.0
@@ -135,6 +139,9 @@ elif st.session_state.result is not None:
 
     if result.stopped_early:
         st.warning(f"Run stopped early: {result.stopped_early}")
+
+    if state["user_goal"]:
+        st.info(f"**You asked:** {state['user_goal']}")
 
     st.markdown("## Insight Summary")
     st.write(state["narrative_summary"] or "_No summary was produced._")
@@ -200,32 +207,83 @@ elif st.session_state.result is not None:
         }
     )
 
+elif st.session_state.checkpoint is not None and not st.session_state.goal_set:
+    # ----- Stage 2: intent gate — what does the human actually want to know? -----
+    checkpoint = st.session_state.checkpoint
+    state = checkpoint.state
+    schema = state["dataset_schema"]
+
+    st.markdown("## What do you want to know?")
+    st.caption(
+        f"Profiled {schema.get('n_rows')} rows x {schema.get('n_cols')} columns. "
+        "Pick the questions you care about and/or write your own — the agent will aim its "
+        "analysis, its charts, and its summary at answering them."
+    )
+
+    picked: list[str] = []
+    if state["suggested_questions"]:
+        st.markdown("**This dataset can answer questions like:**")
+        for i, q in enumerate(state["suggested_questions"]):
+            if st.checkbox(q, key=f"suggested_q_{i}"):
+                picked.append(q)
+
+    custom = st.text_area(
+        "Or tell it what you want in your own words",
+        placeholder="e.g. Which city has the highest average fare, and how has that changed over time?",
+        height=100,
+    )
+
+    col_a, col_b = st.columns(2)
+    go = col_a.button("Plan how to answer this", type="primary")
+    skip_goal = col_b.button("Skip — just analyze it")
+
+    if go or skip_goal:
+        goal = "" if skip_goal else "\n".join(picked + ([custom.strip()] if custom.strip() else []))
+        on_progress = _make_progress_renderer()
+        start = time.monotonic()
+        with st.spinner("Planning..."):
+            try:
+                make_plan(checkpoint, user_goal=goal, on_progress=on_progress)
+            except Exception as e:
+                st.error(f"Planning failed: {e}")
+                st.stop()
+        st.session_state.elapsed_plan += time.monotonic() - start
+        st.session_state.goal_set = True
+        st.rerun()
+
+    if st.button("Start over"):
+        _reset()
+        st.rerun()
+
 elif st.session_state.checkpoint is not None:
-    # ----- Stage 2: human-in-the-loop plan review -----
+    # ----- Stage 3: human-in-the-loop plan review -----
     checkpoint = st.session_state.checkpoint
     state = checkpoint.state
 
     st.markdown("## Planner's proposed plan")
+    if state["user_goal"]:
+        st.info(f"**Answering:** {state['user_goal']}")
     st.caption(
         "The Planner decided what to do — in plain English, no code yet. Review and edit the "
-        "cleaning steps below before the Executor writes and runs any code."
+        "steps below before the Executor writes and runs any code."
     )
 
     clean_steps = planner.cleaning_steps(state["plan"])
     explore_steps = planner.exploration_steps(state["plan"])
 
-    st.markdown("**Proposed cleaning steps** (edit freely — one per line, delete a line to skip it):")
-    edited_text = st.text_area(
-        "Cleaning steps", value="\n".join(clean_steps), height=150, label_visibility="collapsed"
+    st.markdown("**Analysis it will run** (edit freely — one per line, delete a line to skip it):")
+    edited_explore = st.text_area(
+        "Analysis steps", value="\n".join(explore_steps), height=160, label_visibility="collapsed"
     )
 
-    with st.expander(f"Planned exploration steps ({len(explore_steps)}) — informational, not editable"):
-        for s in explore_steps:
-            st.write(f"- {s}")
+    st.markdown("**Cleaning it will apply first** (same — edit or delete lines):")
+    edited_clean = st.text_area(
+        "Cleaning steps", value="\n".join(clean_steps), height=120, label_visibility="collapsed"
+    )
 
     col_a, col_b, col_c = st.columns(3)
     approve = col_a.button("Approve & run", type="primary")
-    skip_clean = col_b.button("Skip cleaning entirely")
+    skip_clean = col_b.button("Run without cleaning")
     start_over = col_c.button("Start over")
 
     if start_over:
@@ -233,10 +291,11 @@ elif st.session_state.checkpoint is not None:
         st.rerun()
 
     if approve or skip_clean:
-        new_clean_descriptions = [] if skip_clean else [ln.strip() for ln in edited_text.splitlines() if ln.strip()]
+        new_clean = [] if skip_clean else [ln.strip() for ln in edited_clean.splitlines() if ln.strip()]
+        new_explore = [ln.strip() for ln in edited_explore.splitlines() if ln.strip()]
         state["plan"] = (
-            [PlannedStep(stage="clean", description=d) for d in new_clean_descriptions]
-            + [s for s in state["plan"] if s["stage"] != "clean"]
+            [PlannedStep(stage="clean", description=d) for d in new_clean]
+            + [PlannedStep(stage="explore", description=d) for d in new_explore]
         )
         state["plan_approved"] = True
 
@@ -253,8 +312,8 @@ elif st.session_state.checkpoint is not None:
         st.rerun()
 
 else:
-    # ----- Stage 1: upload -> plan -----
-    if st.button("Plan analysis", type="primary"):
+    # ----- Stage 1: upload -> profile + suggest questions -----
+    if st.button("Profile dataset", type="primary"):
         suffix = os.path.splitext(uploaded.name)[1]
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(uploaded.getbuffer())
@@ -264,9 +323,9 @@ else:
         on_progress = _make_progress_renderer()
 
         start = time.monotonic()
-        with st.spinner("Profiling dataset and planning..."):
+        with st.spinner("Profiling dataset..."):
             try:
-                checkpoint = plan_analysis(
+                checkpoint = profile_and_suggest(
                     dataset_path=tmp_path,
                     dataset_name=uploaded.name,
                     model=model,
@@ -275,7 +334,7 @@ else:
                     on_progress=on_progress,
                 )
             except Exception as e:
-                st.error(f"Planning failed: {e}")
+                st.error(f"Profiling failed: {e}")
                 st.stop()
         st.session_state.elapsed_plan = time.monotonic() - start
         st.session_state.checkpoint = checkpoint
