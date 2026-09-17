@@ -137,16 +137,20 @@ def test_timeout_retry_reuses_code_without_an_extra_llm_call():
 
 
 def test_critic_review_findings_filters_ungrounded_and_trivial_findings():
+    """The LLM pass still fully controls findings the significance gate has
+    no opinion on: a trivial restatement and a distribution claim that
+    misstates its own stats (neither "groupby"/"correlation"/"outlier", so
+    neither can ever carry a caveat) are dropped exactly as the model says."""
     from agent.agents import critic
 
     state = new_state("test")
     state["findings"] = [
         {"kind": "other", "description": "There are 500 rows.", "stats": {}},
-        {"kind": "correlation", "description": "Strong correlation of 0.02 between A and B.", "stats": {"correlation": 0.02}},
-        {"kind": "outlier", "description": "There are 15 outliers above 500.", "stats": {"n": 15}},
+        {"kind": "distribution", "description": "Age is bimodal with peaks at 20 and 80.", "stats": {"mean": 35.0, "std": 5.0}},
+        {"kind": "groupby", "description": "North region has 500 customers.", "stats": {"n": 500}},
     ]
     fake_resp = LLMResponse(
-        text='```json\n{"keep_indices": [2], "drop_reasons": {"0": "restates row count", "1": "contradicts its own stats"}}\n```',
+        text='```json\n{"keep_indices": [2], "drop_reasons": {"0": "restates row count", "1": "std of 5 around a mean of 35 doesn\'t support a bimodal claim"}}\n```',
         input_tokens=50, output_tokens=30, cost_usd=0.0,
     )
     with patch("agent.agents.critic.call_llm", return_value=fake_resp):
@@ -154,7 +158,44 @@ def test_critic_review_findings_filters_ungrounded_and_trivial_findings():
 
     assert review["kept"] == 1 and review["dropped"] == 2
     assert len(state["findings"]) == 1
-    assert state["findings"][0]["description"].startswith("There are 15")
+    assert state["findings"][0]["description"].startswith("North region")
+
+
+def test_critic_never_drops_a_caveated_finding_even_if_the_llm_tries_to():
+    """Policy decision, enforced in code rather than left to the LLM's
+    compliance with an instruction: a finding the deterministic
+    significance gate has already caveated is NEVER dropped by the Critic's
+    LLM pass, regardless of what the LLM decides. Before this was enforced,
+    the exact same prompt ("weigh the caveat, don't treat it as automatic
+    grounds to drop") produced two different outcomes on two live runs —
+    one dropped a small-sample finding outright, another kept and hedged an
+    equivalent one. That inconsistency, not the underlying arithmetic, was
+    the bug — see README "Critic & LLM-as-Judge".
+
+    This mock LLM tries to drop ALL THREE findings, including the caveated
+    one, citing the caveat's own reasoning ("small sample") as its excuse —
+    exactly the failure mode this test guards against."""
+    from agent.agents import critic
+
+    state = new_state("test")
+    state["dataset_schema"] = {"n_rows": 1200}
+    state["findings"] = [
+        {"kind": "other", "description": "There are 1200 rows.", "stats": {}},
+        {"kind": "distribution", "description": "Nonsense claim.", "stats": {"mean": 1.0}},
+        {"kind": "outlier", "description": "There are 15 outliers.", "stats": {"n": 15}},
+    ]
+    fake_resp = LLMResponse(
+        text='```json\n{"keep_indices": [], "drop_reasons": {"0": "restates row count", "1": "unsupported", "2": "small sample, weak evidence"}}\n```',
+        input_tokens=50, output_tokens=30, cost_usd=0.0,
+    )
+    with patch("agent.agents.critic.call_llm", return_value=fake_resp):
+        review = critic.review_findings(state, tracker=None, model="x")
+
+    assert review["kept"] == 1, "the caveated finding must survive even though the LLM tried to drop it"
+    assert review["dropped"] == 2
+    assert len(state["findings"]) == 1
+    assert state["findings"][0]["description"] == "There are 15 outliers."
+    assert state["findings"][0]["caveat"] != ""
 
 
 def test_critic_fails_open_on_unparseable_response():

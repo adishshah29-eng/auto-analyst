@@ -39,8 +39,12 @@ Keep a finding if it's specific, supported by its own stats, and says something 
 this dataset.
 
 Some findings carry a "caveat" field (set by a deterministic pre-check, not an opinion) noting a
-small sample size or a weak effect. A caveated finding is fine to keep — it's still real, just
-weaker evidence — weigh the caveat rather than treating it as automatic grounds to drop.
+small sample size or a weak effect. These are ALWAYS kept in the final report regardless of what
+you decide here — the caveat plus the Synthesizer's hedge is the safeguard for a weak finding, not
+your judgment call, so don't spend effort deciding whether to drop one for that reason; just put
+its index in keep_indices. You can still drop a caveated finding for an UNRELATED reason from the
+list above (e.g. it also duplicates another finding), but "the caveat says it's weak" is never
+itself a reason — you're not going to be able to overrule it either way.
 
 Respond with a single ```json code block:
 {"keep_indices": [0, 2, 3, ...], "drop_reasons": {"1": "restates row count, not a real finding", ...}}
@@ -128,10 +132,26 @@ def review_findings(state: AnalysisState, tracker: CostTracker, model: str) -> C
         state["critic_review"] = review
         return review
 
-    reasons = [str(v) for v in drop_reasons.values()]
+    # A caveated finding is never dropped, full stop — enforced here, not
+    # left to the LLM's compliance with the instruction above. Every caveat
+    # in this codebase comes from the same deterministic check
+    # (agent.agents.significance) and means the same thing: the number is
+    # real, the sample/effect size can't support it as firm, hedge it. That
+    # is not a judgment call the Critic should get to relitigate — leaving
+    # it as one produced two different outcomes on two live runs of the
+    # exact same code (one dropped a small-sample finding outright, the
+    # other kept and hedged an equivalent one), which is the kind of
+    # unpredictability a quality gate should not have. See README "Critic &
+    # LLM-as-Judge".
+    for i, f in enumerate(findings):
+        if f.get("caveat"):
+            keep_indices.add(i)
+
+    dropped_indices = [i for i in range(len(findings)) if i not in keep_indices]
+    reasons = [str(drop_reasons.get(str(i), drop_reasons.get(i, "no reason given"))) for i in dropped_indices]
     kept_findings = [f for i, f in enumerate(findings) if i in keep_indices]
 
-    review = CriticReview(kept=len(kept_findings), dropped=len(findings) - len(kept_findings), reasons=reasons)
+    review = CriticReview(kept=len(kept_findings), dropped=len(dropped_indices), reasons=reasons)
     state["findings"] = kept_findings if kept_findings else findings  # never drop to zero silently
     if not kept_findings:
         review["kept"] = len(findings)
