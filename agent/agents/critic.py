@@ -97,7 +97,9 @@ def review_findings(state: AnalysisState, tracker: CostTracker, model: str) -> C
     — a non-LLM check that annotates, never drops, findings resting on too
     few rows or a weak correlation — so both the LLM pass below and the
     Synthesizer afterward see which findings need a hedge."""
-    state["findings"] = flag_low_confidence_findings(state["findings"])
+    state["findings"] = flag_low_confidence_findings(
+        state["findings"], n_rows=state["dataset_schema"].get("n_rows")
+    )
     findings = state["findings"]
     if not findings:
         review = CriticReview(kept=0, dropped=0, reasons=[])

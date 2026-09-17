@@ -27,9 +27,14 @@ Build a Python list of dicts named `findings`, each shaped like:
   "description": "<one plain-English sentence stating the finding, with the actual numbers>",
   "stats": {{...small dict of the supporting numbers...}}}}
 For "groupby", "correlation", and "outlier" findings, include "n" in stats — the number of rows
-the finding is based on (the subgroup size for a groupby, the number of paired observations for a
-correlation, the count for an outlier group) — a downstream check flags findings based on too few
-rows as low-confidence, and it can only do that if "n" is actually reported.
+the SPECIFIC CLAIM rests on, which for a subset is NOT the dataset's total row count:
+- groupby: the row count of the one category the finding names. If you write "category X has the
+  highest rate", n is len(df[df[col] == "X"]), NOT len(df).
+- outlier: how many rows are actually outliers, not how many rows were scanned.
+- correlation: the number of paired non-null observations (this one may legitimately equal the
+  total row count).
+Compute n from the data — do not assume it. A downstream check flags claims resting on too few
+rows, and reporting the dataset size for a subgroup defeats it entirely.
 Do not put any raw row-level data into `findings` — aggregated numbers only.
 
 Cleaning already applied: {cleaning_actions}
@@ -54,9 +59,14 @@ Build a Python list of dicts named `findings`, each shaped like:
   "description": "<one plain-English sentence stating the finding, with the actual numbers>",
   "stats": {{...small dict of the supporting numbers...}}}}
 For "groupby", "correlation", and "outlier" findings, include "n" in stats — the number of rows
-the finding is based on (the subgroup size for a groupby, the number of paired observations for a
-correlation, the count for an outlier group) — a downstream check flags findings based on too few
-rows as low-confidence, and it can only do that if "n" is actually reported.
+the SPECIFIC CLAIM rests on, which for a subset is NOT the dataset's total row count:
+- groupby: the row count of the one category the finding names. If you write "category X has the
+  highest rate", n is len(df[df[col] == "X"]), NOT len(df).
+- outlier: how many rows are actually outliers, not how many rows were scanned.
+- correlation: the number of paired non-null observations (this one may legitimately equal the
+  total row count).
+Compute n from the data — do not assume it. A downstream check flags claims resting on too few
+rows, and reporting the dataset size for a subgroup defeats it entirely.
 Only include findings that are actually notable (skip trivial/obvious ones). Aim for 3-8 findings.
 Do not put any raw row-level data into `findings` — aggregated numbers only.
 
