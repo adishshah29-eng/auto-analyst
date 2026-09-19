@@ -24,7 +24,7 @@ load_dotenv()
 
 from agent.agents import planner  # noqa: E402
 from agent.llm import DEFAULT_MODEL, infer_provider  # noqa: E402
-from agent.loop import execute_analysis, make_plan, profile_and_suggest  # noqa: E402
+from agent.loop import ask_followup, execute_analysis, make_plan, profile_and_suggest  # noqa: E402
 from agent.state import PlannedStep  # noqa: E402
 
 
@@ -101,6 +101,15 @@ if "elapsed_plan" not in st.session_state:
     st.session_state.elapsed_plan = 0.0
 if "elapsed_exec" not in st.session_state:
     st.session_state.elapsed_exec = 0.0
+if "followups" not in st.session_state:
+    st.session_state.followups = []  # list[AnalysisRunResult] — one per follow-up question asked so far
+if "followup_input_key" not in st.session_state:
+    # Streamlit text_area doesn't reliably clear just by deleting its
+    # session_state entry — the reliable way to force a genuinely blank box
+    # after asking is to give the next render a widget key it's never seen
+    # before, so it's constructed fresh rather than reusing whatever the
+    # frontend still has displayed.
+    st.session_state.followup_input_key = 0
 
 
 def _make_progress_renderer():
@@ -121,22 +130,18 @@ def _reset() -> None:
     st.session_state.result = None
     st.session_state.elapsed_plan = 0.0
     st.session_state.elapsed_exec = 0.0
+    st.session_state.followups = []
+    st.session_state.followup_input_key = 0
 
 
-uploaded = st.file_uploader("Upload a dataset", type=["csv", "json", "xlsx", "xls"])
-
-if uploaded is None:
-    _reset()
-    st.info("Upload a CSV (or JSON/Excel) file to begin.")
-
-elif st.session_state.result is not None:
-    # ----- Stage 3: results -----
-    result = st.session_state.result
+def _render_result(result, elapsed_s: float, is_followup: bool = False) -> None:
+    """Renders one full analysis result — the main run, or a follow-up
+    round. Follow-ups skip the Dataset profile/Cleaning actions expanders
+    (a fresh AnalysisState per question has an empty cleaning log — see
+    agent.loop.ask_followup — and the schema barely changes question to
+    question), everything else is identical, including the significance
+    gate's caveats and the judge score."""
     state = result.state
-
-    if st.button("Start a new analysis"):
-        _reset()
-        st.rerun()
 
     if result.stopped_early:
         st.warning(f"Run stopped early: {result.stopped_early}")
@@ -144,7 +149,7 @@ elif st.session_state.result is not None:
     if state["user_goal"]:
         st.info(f"**You asked:** {state['user_goal']}")
 
-    st.markdown("## Insight Summary")
+    st.markdown("## Insight Summary" if not is_followup else "### Insight Summary")
     st.write(state["narrative_summary"] or "_No summary was produced._")
 
     nr = state["narrative_review"]
@@ -156,8 +161,8 @@ elif st.session_state.result is not None:
         )
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Latency", f"{st.session_state.elapsed_plan + st.session_state.elapsed_exec:.1f}s")
-    col2.metric("Est. cost", f"${result.tracker.total_cost_usd:.4f}")
+    col1.metric("Latency", f"{elapsed_s:.1f}s")
+    col2.metric("Total cost so far", f"${result.tracker.total_cost_usd:.4f}")
     col3.metric("Findings", len(state["findings"]))
     col4.metric("Charts", len(state["charts_generated"]))
 
@@ -166,7 +171,7 @@ elif st.session_state.result is not None:
             for reason in state["critic_review"]["reasons"]:
                 st.write(f"- {reason}")
 
-    st.markdown("## Charts")
+    st.markdown("### Charts")
     if state["charts_generated"]:
         # Each chart is a standalone interactive Plotly HTML document (hover
         # tooltips, zoom/pan, legend toggling) — embedded via an iframe
@@ -184,12 +189,13 @@ elif st.session_state.result is not None:
     else:
         st.write("_No charts were generated._")
 
-    with st.expander("Dataset profile"):
-        st.json(state["dataset_schema"])
+    if not is_followup:
+        with st.expander("Dataset profile"):
+            st.json(state["dataset_schema"])
 
-    with st.expander(f"Cleaning actions ({len(state['cleaning_actions_taken'])})"):
-        for a in state["cleaning_actions_taken"]:
-            st.write(f"- {a}")
+        with st.expander(f"Cleaning actions ({len(state['cleaning_actions_taken'])})"):
+            for a in state["cleaning_actions_taken"]:
+                st.write(f"- {a}")
 
     with st.expander(f"Findings ({len(state['findings'])})"):
         for f in state["findings"]:
@@ -209,7 +215,7 @@ elif st.session_state.result is not None:
             if step["error"]:
                 st.code(step["error"], language="text")
 
-    st.markdown("## Cost & timing")
+    st.markdown("### Cost & timing" if is_followup else "## Cost & timing")
     st.json(
         {
             "total_cost_usd": round(result.tracker.total_cost_usd, 5),
@@ -221,8 +227,62 @@ elif st.session_state.result is not None:
     if state.get("run_id"):
         st.caption(
             f"Run ID: `{state['run_id']}` — full trace (every prompt, response, and sandbox "
-            f"execution) at `outputs/runs/{state['run_id']}.jsonl` for debugging a specific run."
+            f"execution) at `outputs/runs/{state['run_id']}.jsonl` for debugging this whole session."
         )
+
+
+uploaded = st.file_uploader("Upload a dataset", type=["csv", "json", "xlsx", "xls"])
+
+if uploaded is None:
+    _reset()
+    st.info("Upload a CSV (or JSON/Excel) file to begin.")
+
+elif st.session_state.result is not None:
+    # ----- Stage 3: results, plus any follow-up questions asked so far -----
+    result = st.session_state.result
+
+    if st.button("Start a new analysis"):
+        _reset()
+        st.rerun()
+
+    _render_result(result, st.session_state.elapsed_plan + st.session_state.elapsed_exec)
+
+    for i, followup_result in enumerate(st.session_state.followups):
+        st.markdown("---")
+        st.markdown(f"## Follow-up {i + 1}")
+        _render_result(followup_result, st.session_state.get(f"elapsed_followup_{i}", 0.0), is_followup=True)
+
+    st.markdown("---")
+    st.markdown("## Ask a follow-up")
+    st.caption(
+        "Ask something else about this same dataset — it reuses the already-cleaned data, so "
+        "there's no re-upload or re-cleaning, just a new question."
+    )
+    followup_goal = st.text_area(
+        "Your question",
+        placeholder="e.g. Now break that down by month instead of by region.",
+        height=80,
+        label_visibility="collapsed",
+        key=f"followup_input_{st.session_state.followup_input_key}",
+    )
+    if st.button("Ask", type="primary", disabled=not followup_goal.strip()):
+        on_progress = _make_progress_renderer()
+        start = time.monotonic()
+        with st.spinner("Answering your follow-up..."):
+            try:
+                followup_result = ask_followup(
+                    st.session_state.checkpoint,
+                    cleaned_df=result.cleaned_df,
+                    user_goal=followup_goal.strip(),
+                    on_progress=on_progress,
+                )
+            except Exception as e:
+                st.error(f"Follow-up failed: {e}")
+                st.stop()
+        st.session_state[f"elapsed_followup_{len(st.session_state.followups)}"] = time.monotonic() - start
+        st.session_state.followups.append(followup_result)
+        st.session_state.followup_input_key += 1  # force a genuinely blank box next render
+        st.rerun()
 
 elif st.session_state.checkpoint is not None and not st.session_state.goal_set:
     # ----- Stage 2: intent gate — what does the human actually want to know? -----

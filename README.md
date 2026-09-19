@@ -4,7 +4,7 @@ Upload any CSV you've never shown it before, and four agents — **Planner, Exec
 
 ## Demo
 
-Run `streamlit run app.py`, upload one of the datasets in `eval/test_datasets/` (a Titanic-like passenger set, a retail sales log, a CRM leads/deals export — three different shapes, same pipeline, no per-dataset code). It profiles the file, then **asks what you want to know** — offering concrete questions your schema can actually answer, plus a box to write your own. Pick, review the plan it builds to answer that, approve, and Executor → Critic → Synthesizer run, with charts and a summary that answers your question in its first sentence, alongside the Critic's judge score. Or skip the browser and call it via MCP with a `question` argument — see "MCP Server" below.
+Run `streamlit run app.py`, upload one of the datasets in `eval/test_datasets/` (a Titanic-like passenger set, a retail sales log, a CRM leads/deals export — three different shapes, same pipeline, no per-dataset code). It profiles the file, then **asks what you want to know** — offering concrete questions your schema can actually answer, plus a box to write your own. Pick, review the plan it builds to answer that, approve, and Executor → Critic → Synthesizer run, with charts and a summary that answers your question in its first sentence, alongside the Critic's judge score. Then **ask a follow-up** right there on the results page — a second, third, however many questions against the same already-cleaned data, no re-upload — see "Follow-up Questions" below. Or skip the browser and call it via MCP with a `question` argument — see "MCP Server" below.
 
 ## Why CodeAct (not fixed tools)
 
@@ -48,6 +48,14 @@ Intent is taken in words, not chart-type dropdowns, deliberately: a dropdown wou
 `agent/loop.py` splits planning to make this possible: `profile_and_suggest()` stops after profiling with suggested questions, `make_plan(checkpoint, user_goal)` turns the answer into a plan, `execute_analysis()` runs the rest. `run_analysis(..., user_goal=...)` does all of it in one call for non-interactive callers — so an MCP client passing `question=` gets exactly the same goal-directed behavior a human typing one into the app does.
 
 Verified end-to-end in a real browser (Playwright) against live Gemini: upload → schema-specific questions appear → tick one + type a custom one → plan echoes the combined goal → approve → the summary's first sentence answers *both*. On `leads_deals.csv`, asking "which sales rep is performing best, and should I be worried about any of them?" produced four planned steps all about rep performance, four charts all answering facets of it, and the opening line *"L. Fischer is performing best in total deal value ($756,164.57 across 77 deals), but you should be worried because they have the lowest win conversion rate at 21.9%"* — versus the generic lead-source/industry findings the same dataset produces with no goal set.
+
+## Follow-up Questions
+
+The pipeline was one-shot for most of this project's life: upload, answer, done — closing the tab lost everything, and a curious "wait, why is that segment different?" meant starting over from scratch. `agent/loop.py::ask_followup()` fixes that: a text box on the results page asks a second (or third...) question against the *same already-cleaned dataframe*, skipping Load and Clean entirely.
+
+Mechanically, it re-profiles the already-cleaned data (cheap, deterministic, no LLM call — `agent/stages/load_profile.py`, so the schema reflects post-cleaning null counts and category values rather than the stale pre-cleaning ones), asks the Planner for a fresh exploration plan against that profile and the new question, then re-enters the *exact same* Explore → Critic(findings) → Chart → Synthesize → Critic(narrative) tail every normal run uses (`_run_explore_through_judge()`, factored out of `execute_analysis()` specifically so the two paths can never drift apart — a fix to the significance gate or the Critic's never-drop-a-caveated-finding policy applies to a follow-up automatically, not as a separate thing someone has to remember to port). Each question gets its own fresh `AnalysisState` — its own findings, charts, and narrative — rather than one narrative accreting every question asked, so the results page renders a running list of self-contained answers instead of one growing report. The `CostTracker` (so the budget ceiling spans the whole session, not one question) and the trace's `run_id` (so one `outputs/runs/<run_id>.jsonl` file has the whole conversation, not fragments) are both threaded through from the original run.
+
+Verified live: asked `leads_deals.csv` "which lead source generates the most total deal value?", then a genuinely different follow-up, "which sales representative closes the highest percentage of their deals?" — no re-upload, no re-cleaning, and the second answer correctly carried over the significance gate's hedging with no extra work: *"J. Kim closes the highest percentage of their deals at 22.0%... this figure rests on only about 13 actual cases out of 59 rows... treat as exploratory rather than a reflection of a real difference."*
 
 ## Sandbox & Security
 
@@ -115,7 +123,7 @@ Two providers work behind the same `call_llm()` interface (`agent/llm.py`) — A
 
 ## Results
 
-Sandbox isolation (namespace confinement, copy-on-inject, timeout, traceback capture, chart export), the 4-agent pipeline (Planner → Executor → Critic → Synthesizer wiring, the Critic's filtering, the significance gate, the timeout/memory infra-flake retries), the prompt-injection marker actually reaching every stage's prompt, and the human-in-the-loop flow are all covered by a committed test suite (`tests/`, 35 tests, mocked — no API key needed to run it: `pytest tests/`, and run automatically on every push/PR via `.github/workflows/tests.yml`) plus a real browser session (Playwright) and real MCP client calls against live Gemini for the parts a mock can't verify (model output quality, actual UI rendering, actual protocol handshakes).
+Sandbox isolation (namespace confinement, copy-on-inject, timeout, traceback capture, chart export), the 4-agent pipeline (Planner → Executor → Critic → Synthesizer wiring, the Critic's filtering, the significance gate, the timeout/memory infra-flake retries), the prompt-injection marker actually reaching every stage's prompt, and the human-in-the-loop flow are all covered by a committed test suite (`tests/`, 37 tests, mocked — no API key needed to run it: `pytest tests/`, and run automatically on every push/PR via `.github/workflows/tests.yml`) plus a real browser session (Playwright) and real MCP client calls against live Gemini for the parts a mock can't verify (model output quality, actual UI rendering, actual protocol handshakes).
 
 The table below is real `eval/run_eval.py` output against a live model (`gemini-flash-lite-latest`, the free Google AI Studio tier — an `ANTHROPIC_API_KEY` or `GOOGLE_API_KEY` is required to reproduce this, this repo doesn't ship one). Full output in `eval/results.json`.
 
@@ -248,7 +256,7 @@ auto-analyst/
 │   ├── sandbox.py         # restricted exec + timeout + memory limits + copy-on-inject
 │   ├── llm.py              # Anthropic/Google API wrapper + cost/token tracking + budget ceiling
 │   ├── tracing.py          # RunTracer — per-run JSONL trace of every LLM call + sandbox execution
-│   ├── loop.py             # plan_analysis() / execute_analysis() / run_analysis()
+│   ├── loop.py             # plan_analysis() / execute_analysis() / run_analysis() / ask_followup()
 │   ├── agents/
 │   │   ├── planner.py        # decides WHAT to do, plain English, no code
 │   │   ├── critic.py          # filters findings live + LLM-as-judge (reused in eval)

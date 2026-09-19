@@ -98,6 +98,43 @@ def test_full_pipeline_planner_executor_critic_synthesizer(mock_csv, tmp_path):
     assert state["narrative_review"]["grounded_score"] == 5
 
 
+def test_ask_followup_skips_clean_reuses_the_cleaned_df_and_shares_the_tracker(mock_csv, tmp_path):
+    """A follow-up question is supposed to feel like continuing a
+    conversation, not starting over: no re-upload, no re-cleaning, and the
+    budget ceiling/cost total should span the whole session rather than
+    resetting per question. Each question still gets its own fresh
+    findings/narrative rather than accumulating into one giant report."""
+    with patch("agent.agents.planner.call_llm", side_effect=_fake_call_llm), \
+         patch("agent.stages.common.call_llm", side_effect=_fake_call_llm), \
+         patch("agent.agents.critic.call_llm", side_effect=_fake_call_llm), \
+         patch("agent.stages.synthesize.call_llm", side_effect=_fake_call_llm):
+        from agent.loop import ask_followup, execute_analysis, plan_analysis
+
+        checkpoint = plan_analysis(dataset_path=mock_csv, chart_dir=str(tmp_path / "charts"))
+        first = execute_analysis(checkpoint)
+        tokens_after_first = checkpoint.tracker.total_input_tokens
+
+        second = ask_followup(checkpoint, cleaned_df=first.cleaned_df, user_goal="anything else?")
+
+    # A fresh AnalysisState, not the first round's findings/narrative reused —
+    # each question gets its own self-contained answer.
+    assert second.state is not first.state
+    assert second.state["user_goal"] == "anything else?"
+    assert len(second.state["findings"]) >= 1
+    assert second.state["narrative_summary"]
+
+    # The SAME tracker/budget spans both rounds — cost/tokens keep
+    # accumulating across a session rather than resetting per question.
+    assert checkpoint.tracker is second.tracker
+    assert second.tracker.total_input_tokens > tokens_after_first
+
+    # Same trace file (run_id) spans the whole session, not a new one per
+    # question — a debugger reading outputs/runs/<run_id>.jsonl sees the
+    # whole conversation, not fragments.
+    assert second.state["run_id"] == first.state["run_id"]
+    assert second.state["run_id"] != ""
+
+
 def test_timeout_retry_reuses_code_without_an_extra_llm_call():
     """A sandbox timeout is an infra stall, not a code bug — the retry
     should re-run the SAME code with more time, not spend an LLM call

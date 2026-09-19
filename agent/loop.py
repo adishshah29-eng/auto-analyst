@@ -14,6 +14,16 @@ the Planner and the Executor:
 - `run_analysis()` is the convenience wrapper for non-interactive callers
   (eval harness, MCP server, tests): plan then immediately execute with no
   human in the loop.
+- `ask_followup()` is a second (or third...) question against the SAME
+  already-cleaned dataset from a prior `execute_analysis()` call — skips
+  Load/Clean entirely and re-enters at Explore, so asking something else
+  doesn't mean re-uploading or re-cleaning. Shares the actual
+  Explore->Critic->Chart->Synthesize->Critic tail with `execute_analysis()`
+  via `_run_explore_through_judge()` — the two paths only ever differ in
+  what happens *before* that point, never in what happens after, so a fix
+  or a hardening change to that tail (the significance gate, the
+  never-drop-a-caveated-finding policy, tracing) applies to both without
+  anyone having to remember to port it.
 
 See README "Pipeline" for what each stage does and why synthesis is kept
 separate from the analysis stages.
@@ -165,26 +175,22 @@ def plan_analysis(
     return make_plan(checkpoint, user_goal=user_goal, on_progress=on_progress)
 
 
-def execute_analysis(
-    checkpoint: PlanCheckpoint,
-    on_progress: ProgressCallback | None = None,
-    run_critic: bool = True,
-    judge_model: str | None = None,
+def _run_explore_through_judge(
+    state: AnalysisState,
+    df: pd.DataFrame,
+    tracker: CostTracker,
+    model: str,
+    chart_dir: str,
+    exploration_plan: list[str],
+    on_progress: ProgressCallback | None,
+    run_critic: bool,
+    judge_model: str,
 ) -> AnalysisRunResult:
-    state, df, tracker, chart_dir, model = (
-        checkpoint.state,
-        checkpoint.df,
-        checkpoint.tracker,
-        checkpoint.chart_dir,
-        checkpoint.model,
-    )
-    # A model judging its own output is weaker evidence than an independent
-    # judge — it's more likely to rate its own confident-sounding-but-wrong
-    # narrative as fine. Defaults to self-judging (same model throughout)
-    # since that's zero extra config for the common case, but callers that
-    # care about trustworthy eval numbers (see eval/run_eval.py --judge-model)
-    # can point this at a different, stronger model.
-    judge_model = judge_model or model
+    """The shared tail: Explore -> Critic(findings) -> Chart -> Synthesize
+    -> Critic(narrative). `execute_analysis()` reaches this after Clean;
+    `ask_followup()` reaches it after re-profiling an already-cleaned
+    dataframe — see module docstring for why this is factored out rather
+    than duplicated."""
     tracer = tracker.tracer
 
     def notify(stage: str, msg: str) -> None:
@@ -195,17 +201,7 @@ def execute_analysis(
         if tracer is not None:
             tracer.log_stage_boundary(stage, event)
 
-    cleaning_plan = planner.cleaning_steps(state["plan"])
-    exploration_plan = planner.exploration_steps(state["plan"])
-
     try:
-        with StageTimer(state, "clean"):
-            trace("clean", "start")
-            notify("clean", "Executor is implementing the approved cleaning steps...")
-            df = clean.run(state, df, tracker, model, planned_steps=cleaning_plan)
-        notify("clean", f"Cleaning done: {len(state['cleaning_actions_taken'])} action(s) taken.")
-        trace("clean", "end")
-
         with StageTimer(state, "explore"):
             trace("explore", "start")
             notify("explore", "Executor is computing the planned analyses...")
@@ -252,6 +248,116 @@ def execute_analysis(
         return AnalysisRunResult(state=state, cleaned_df=df, tracker=tracker, stopped_early=str(e))
 
     return AnalysisRunResult(state=state, cleaned_df=df, tracker=tracker)
+
+
+def execute_analysis(
+    checkpoint: PlanCheckpoint,
+    on_progress: ProgressCallback | None = None,
+    run_critic: bool = True,
+    judge_model: str | None = None,
+) -> AnalysisRunResult:
+    state, df, tracker, chart_dir, model = (
+        checkpoint.state,
+        checkpoint.df,
+        checkpoint.tracker,
+        checkpoint.chart_dir,
+        checkpoint.model,
+    )
+    # A model judging its own output is weaker evidence than an independent
+    # judge — it's more likely to rate its own confident-sounding-but-wrong
+    # narrative as fine. Defaults to self-judging (same model throughout)
+    # since that's zero extra config for the common case, but callers that
+    # care about trustworthy eval numbers (see eval/run_eval.py --judge-model)
+    # can point this at a different, stronger model.
+    judge_model = judge_model or model
+    tracer = tracker.tracer
+
+    def notify(stage: str, msg: str) -> None:
+        if on_progress:
+            on_progress(stage, msg)
+
+    def trace(stage: str, event: str) -> None:
+        if tracer is not None:
+            tracer.log_stage_boundary(stage, event)
+
+    cleaning_plan = planner.cleaning_steps(state["plan"])
+    exploration_plan = planner.exploration_steps(state["plan"])
+
+    try:
+        with StageTimer(state, "clean"):
+            trace("clean", "start")
+            notify("clean", "Executor is implementing the approved cleaning steps...")
+            df = clean.run(state, df, tracker, model, planned_steps=cleaning_plan)
+        notify("clean", f"Cleaning done: {len(state['cleaning_actions_taken'])} action(s) taken.")
+        trace("clean", "end")
+    except BudgetExceededError as e:
+        notify("budget", str(e))
+        return AnalysisRunResult(state=state, cleaned_df=df, tracker=tracker, stopped_early=str(e))
+
+    return _run_explore_through_judge(
+        state, df, tracker, model, chart_dir, exploration_plan, on_progress, run_critic, judge_model
+    )
+
+
+def ask_followup(
+    checkpoint: PlanCheckpoint,
+    cleaned_df: pd.DataFrame,
+    user_goal: str,
+    on_progress: ProgressCallback | None = None,
+    run_critic: bool = True,
+    judge_model: str | None = None,
+) -> AnalysisRunResult:
+    """A second (or third...) question against the SAME already-cleaned
+    dataset from a prior `execute_analysis()` call — the interactive path a
+    real analysis session actually needs: ask something, read the answer,
+    ask a follow-up, without re-uploading or re-cleaning.
+
+    Skips Load/Clean entirely. Re-profiles `cleaned_df` (cheap, no LLM —
+    agent/stages/load_profile.py) rather than reusing the pre-cleaning
+    schema from the first round, so the Planner/Explore/judge see accurate
+    stats for the data they're actually querying now (null percentages,
+    category top-values, etc. all reflect the cleaning already done, not
+    the raw upload). Builds a fresh AnalysisState — its own findings,
+    charts, and narrative — rather than appending to the prior one, so
+    each question gets its own self-contained answer; the caller (app.py)
+    is expected to keep a list of past results for a running Q&A view.
+
+    Reuses `checkpoint.tracker` (so the budget ceiling and running cost
+    total span the whole session, not just one question) and its run_id
+    (so every question in a session lands in the same trace file)."""
+    tracker, model, chart_dir = checkpoint.tracker, checkpoint.model, checkpoint.chart_dir
+    dataset_name = checkpoint.state["dataset_name"]
+    tracer = tracker.tracer
+
+    state = new_state(dataset_name, run_id=(tracer.run_id if tracer is not None else ""))
+    state["user_goal"] = user_goal.strip()
+
+    def notify(stage: str, msg: str) -> None:
+        if on_progress:
+            on_progress(stage, msg)
+
+    with StageTimer(state, "load_profile"):
+        if tracer is not None:
+            tracer.log_stage_boundary("load_profile", "start")
+        notify("load_profile", "Re-profiling the already-cleaned dataset for your follow-up...")
+        load_profile.run(state, cleaned_df)
+    notify("load_profile", "Profile complete.")
+    if tracer is not None:
+        tracer.log_stage_boundary("load_profile", "end")
+
+    with StageTimer(state, "plan"):
+        if tracer is not None:
+            tracer.log_stage_boundary("plan", "start")
+        notify("plan", "Planner is working out how to answer your follow-up...")
+        state["plan"] = planner.plan(state, tracker, model)
+    exploration_plan = planner.exploration_steps(state["plan"])
+    notify("plan", f"Plan ready: {len(exploration_plan)} exploration step(s).")
+    if tracer is not None:
+        tracer.log_stage_boundary("plan", "end")
+
+    return _run_explore_through_judge(
+        state, cleaned_df, tracker, model, chart_dir, exploration_plan, on_progress, run_critic, judge_model or model
+    )
 
 
 def run_analysis(

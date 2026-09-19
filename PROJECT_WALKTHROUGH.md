@@ -178,6 +178,20 @@ schema/cleaning log (`grounded_score`, 1-5)? Does it say anything non-obvious
 an expandable findings list (with ⚠️ caveats where they apply), the cleaning
 log, the full generated-code/execution log, and cost/timing numbers.
 
+**Step 12 — Ask a follow-up (optional).** A text box right there on the
+results page: ask something else about the *same* dataset — "now break that
+down by month," "which rep should I be worried about" — no re-upload, no
+re-cleaning. `agent/loop.py::ask_followup()` re-profiles the already-cleaned
+data (cheap, no AI) and re-enters at Explore, going through the exact same
+Explore → Significance Gate → Critic → Chart → Synthesize → Judge chain a
+normal run uses, so every hardening decision (the caveat gate, the
+never-drop-a-caveated-finding policy) applies automatically — nothing about
+follow-ups is a separate, less-tested path. Each question gets its own
+fresh answer, rendered as its own "Follow-up N" block underneath the
+original, so a session reads like a running Q&A rather than one report
+mutating in place. The budget ceiling and the trace file (`run_id`) both
+span the whole session, not just one question.
+
 ---
 
 ## 5. Deep dive: The Sandbox (security layer 1)
@@ -663,6 +677,14 @@ handful of concurrent users.
 Either — Anthropic Claude or Google Gemini, picked by whichever API key
 you provide. The live demo defaults to Gemini's free tier so it costs $0 to
 run.
+
+**"Can you ask it more than one question, or is it one-shot?"**
+You can ask follow-ups on the same results page — a second, third, however
+many, against the same already-cleaned dataset, no re-upload. It skips
+re-cleaning and re-enters the pipeline straight at Explore, so it's fast
+and reuses the exact same quality checks (the significance gate, the
+Critic) a first-time run gets. Each question gets its own self-contained
+answer rather than one report growing forever.
 
 **"Are the charts interactive, like Power BI?"**
 Yes — Plotly, not matplotlib. Hover a data point for a tooltip, zoom/pan,
