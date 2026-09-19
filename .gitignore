@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .env
+outputs/charts/*.html
 outputs/charts/*.png
 outputs/runs/
 .DS_Store

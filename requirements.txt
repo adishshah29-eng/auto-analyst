@@ -1,9 +1,17 @@
 pandas>=2.2
 numpy>=1.26
-matplotlib>=3.8
+plotly>=5.24
 anthropic>=0.40
 google-genai>=1.0
 streamlit>=1.38
 python-dotenv>=1.0
 mcp[cli]>=1.0,<2
 pytest>=7.0
+
+# Optional, not installed by default: `pip install kaleido` locally if you
+# want the MCP server to send static PNG images of charts too (it bundles
+# its own renderer, which is a real memory cost on the ~1GB Streamlit Cloud
+# tier this project deploys to — see agent/sandbox.py's chart-collection
+# block and README "Interactive Charts"). The app itself doesn't need it;
+# charts render as interactive Plotly HTML either way.
+# kaleido>=0.2.1

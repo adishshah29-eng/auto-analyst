@@ -53,10 +53,29 @@ def test_open_blocked(df):
 
 
 def test_chart_saved_to_disk(df, tmp_path):
-    r = run_sandboxed("plt.figure()\nplt.plot([1, 2, 3])", df, chart_dir=str(tmp_path), chart_prefix="t")
+    """Charts are Plotly figures collected into a `charts` list convention
+    (there's no plt.get_fignums()-style global registry to fall back on) —
+    the worker reads that list back and saves each as a standalone
+    interactive HTML file."""
+    code = "charts = [go.Figure(data=[go.Scatter(x=[1, 2, 3], y=[1, 2, 3])])]"
+    r = run_sandboxed(code, df, chart_dir=str(tmp_path), chart_prefix="t")
     assert r.success, r.error
     assert len(r.chart_paths) == 1
     assert os.path.exists(r.chart_paths[0])
+    assert r.chart_paths[0].endswith(".html")
+    with open(r.chart_paths[0]) as f:
+        html = f.read()
+    assert "plotly" in html.lower()
+
+
+def test_chart_ignores_non_figure_entries_in_the_charts_list(df, tmp_path):
+    """A `charts` list entry that isn't a real Plotly figure (e.g. the model
+    appended the wrong thing) is skipped rather than crashing the whole
+    stage — one bad entry shouldn't lose every other chart."""
+    code = "charts = [go.Figure(data=[go.Scatter(x=[1], y=[1])]), 'not a figure', 42]"
+    r = run_sandboxed(code, df, chart_dir=str(tmp_path), chart_prefix="t2")
+    assert r.success, r.error
+    assert len(r.chart_paths) == 1
 
 
 def test_severe_memory_pressure_reports_a_real_error_not_silent_crash(df):

@@ -31,7 +31,8 @@ class CriticReview(TypedDict):
 
 
 class ChartMeta(TypedDict):
-    path: str
+    path: str  # interactive standalone Plotly HTML file — see agent/sandbox.py
+    static_path: str  # optional static PNG (only if `kaleido` is installed); "" otherwise
     chart_type: str
     question: str  # what question this chart answers
 

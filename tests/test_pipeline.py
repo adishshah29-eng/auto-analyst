@@ -38,7 +38,7 @@ CRITIC_FINDINGS_RESP = (
 )
 CHART_RESP = (
     "```python\n"
-    "plt.figure()\nplt.hist(df['age'])\n"
+    "charts = [go.Figure(data=[go.Histogram(x=df['age'])])]\n"
     "chart_meta = [{'chart_type': 'histogram', 'question': 'What is the age distribution?'}]\n"
     "```"
 )
@@ -59,7 +59,7 @@ def _fake_call_llm(system, user_message, tracker=None, model=None, max_tokens=20
         return LLMResponse(text=EXPLORE_RESP, input_tokens=10, output_tokens=5, cost_usd=0.0)
     if "Drop a finding if" in system:
         return LLMResponse(text=CRITIC_FINDINGS_RESP, input_tokens=10, output_tokens=5, cost_usd=0.0)
-    if "create the matplotlib chart" in user_message:
+    if "create the Plotly chart" in user_message:
         return LLMResponse(text=CHART_RESP, input_tokens=10, output_tokens=5, cost_usd=0.0)
     if "judge scoring" in system.lower():
         return LLMResponse(text=JUDGE_RESP, input_tokens=10, output_tokens=5, cost_usd=0.0)

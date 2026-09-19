@@ -1,6 +1,6 @@
 # Autonomous Data Analysis Agent
 
-Upload any CSV you've never shown it before, and four agents — **Planner, Executor, Critic, Synthesizer** — write and execute real pandas/matplotlib code in a sandbox to clean it, find what's actually interesting in it, chart that, and hand back a plain-English summary, with a human review gate before any code runs.
+Upload any CSV you've never shown it before, and four agents — **Planner, Executor, Critic, Synthesizer** — write and execute real pandas/Plotly code in a sandbox to clean it, find what's actually interesting in it, chart that (as genuinely interactive charts — hover, zoom, pan — not static pictures), and hand back a plain-English summary, with a human review gate before any code runs.
 
 ## Demo
 
@@ -8,7 +8,7 @@ Run `streamlit run app.py`, upload one of the datasets in `eval/test_datasets/` 
 
 ## Why CodeAct (not fixed tools)
 
-A beginner version of this hardcodes `load_csv()` / `make_bar_chart()` style tools, and breaks the moment a dataset doesn't match the assumptions baked into them — a column that isn't named what the tool expected, a numeric column that's actually a category, a schema the author never tested against. This agent instead treats **code execution as the only tool**: at each analysis stage it writes a short pandas/matplotlib snippet against the dataframe it actually has, runs it, and reacts to what comes back (a result or a traceback). That's the same THINK → ACT → OBSERVE loop as any ReAct agent, with "run this Python" standing in for a fixed function call — so it generalizes to whatever shape of data shows up, instead of only the one shape it was tested against.
+A beginner version of this hardcodes `load_csv()` / `make_bar_chart()` style tools, and breaks the moment a dataset doesn't match the assumptions baked into them — a column that isn't named what the tool expected, a numeric column that's actually a category, a schema the author never tested against. This agent instead treats **code execution as the only tool**: at each analysis stage it writes a short pandas/Plotly snippet against the dataframe it actually has, runs it, and reacts to what comes back (a result or a traceback). That's the same THINK → ACT → OBSERVE loop as any ReAct agent, with "run this Python" standing in for a fixed function call — so it generalizes to whatever shape of data shows up, instead of only the one shape it was tested against.
 
 ## Pipeline: four agents, not one
 
@@ -25,7 +25,7 @@ Splitting "decide what's worth doing" from "write the code for it" from "check w
 2. **Executor — Clean** (`agent/stages/clean.py`) — implements the *approved* cleaning steps (a human may have edited them). This stage's job is now HOW, not WHAT.
 3. **Executor — Explore** (`agent/stages/explore.py`) — computes exactly the planned analyses (distributions, correlations, outliers, group-bys), producing a structured findings list.
 4. **Critic — findings** (`agent/agents/critic.py`) — reviews the findings *before* they reach a chart or the narrative, and actually **drops** ones that are trivial ("there are 500 rows"), ungrounded (calls a correlation "strong" when the stat is near zero), or duplicate. This is a real filter, not a logged opinion — mutates the findings list in place. Runs between Explore and Chart so a dropped finding never gets charted.
-5. **Executor — Chart** (`agent/stages/chart.py`) — picks a chart type per surviving finding (histogram for a skewed distribution, scatter for a flagged correlation, bar for a categorical breakdown, line for a time trend) and writes the matplotlib code.
+5. **Executor — Chart** (`agent/stages/chart.py`) — picks a chart type per surviving finding (histogram for a skewed distribution, scatter for a flagged correlation, bar for a categorical breakdown, line for a time trend) and writes Plotly code — see "Interactive Charts" below.
 6. **Synthesizer** (`agent/stages/synthesize.py`) — a **separate** LLM call, not code execution. Reads only the critic-approved findings and chart metadata and writes the narrative. Kept distinct on purpose: earlier stages *produce* findings, this one *explains* them.
 7. **Critic — narrative** (`agent/agents/critic.py`, same module) — LLM-as-judge over the finished narrative: is every claim grounded in the findings/cleaning actions it was given, does it say anything non-obvious, is it actionable. The *same function* is used live (shown in the UI as a judge badge) and by `eval/run_eval.py` (the "insight relevance" column) — one implementation, two call sites, so the eval number means what the live badge means.
 
@@ -65,6 +65,37 @@ Run live against Gemini (`gemini-flash-lite-latest`) on that dataset: the string
 This is a defense against the specific failure mode of a value flowing into the *reasoning* prompt — it is not a claim that the sandbox is safe to run fully untrusted, internet-facing code without further hardening (see Limitations below).
 
 `agent.stages.common.format_data_block()` is what actually attaches the `DATA (untrusted...)` marker — and, on a later audit, most call sites that embedded `state["dataset_schema"]` into a prompt (the Planner's suggest/plan calls, Explore, the Critic's narrative judge) were building their own labelled string by hand with a plain `json.dumps(...)[:N]` slice instead of calling it, so the marker text this whole mitigation depends on never actually appeared in those prompts — only Chart's happened to. Every one of those call sites now goes through `format_data_block()`; `tests/test_injection.py` plants the same injection string used in `leads_deals.csv` directly inside a schema's `top_values` and asserts the marker precedes it in the constructed prompt for each stage, so this can't silently regress back to a bare `json.dumps()` slice.
+
+## Interactive Charts
+
+Charts are Plotly, not matplotlib — hover tooltips, zoom/pan, legend toggling, a download-as-PNG
+button — rendered live in the browser, not a static picture. The sandbox (`agent/sandbox.py`)
+exposes `px` (plotly.express) and `go` (plotly.graph_objects) instead of `plt`; the Chart stage's
+prompt asks the model to build each figure and append it to a plain Python list named `charts`
+(Plotly has no global figure registry the way matplotlib's `pyplot` does, so there's no
+`plt.get_fignums()`-equivalent auto-discovery — the model has to hand the figures back explicitly).
+The sandbox worker reads that list and saves each figure as a **standalone interactive HTML file**
+(`fig.write_html(...)`) into `chart_dir`; the Streamlit app embeds that HTML directly via
+`st.components.v1.html()` (an iframe), not `st.image()` — there's no PNG in this path at all.
+
+**MCP is the one place this can't fully carry over.** An MCP client (Claude Desktop, Claude Code)
+renders a text/image response, not live JavaScript, so `mcp_server.py` needs an actual raster image
+for each chart. That requires the optional `kaleido` package (commented out in `requirements.txt`,
+`pip install kaleido` to enable) — deliberately **not** a hard dependency, because it bundles its
+own renderer and this project deploys to a ~1GB container where every dependency is a real memory
+decision, not a free one (see "Deploy" and "Key Learnings" for why that constraint has bitten this
+project before). The sandbox worker tries `fig.write_image()` right after building each chart
+(inside the same already-isolated, already resource-limited child process) and silently records
+`""` if `kaleido` isn't installed or the export fails; `mcp_server.py` sends the PNG when one
+exists, and a plain text note pointing at the interactive HTML file when it doesn't. The app itself
+never touches this code path — its charts are unaffected either way.
+
+Verified live, not just unit-tested: ran the pipeline against `leads_deals.csv` with a live model,
+confirmed the saved files are genuine Plotly documents (`Plotly.newPlot(...)`, loaded from
+`cdn.plot.ly`), then drove the actual deployed-shape app with Playwright — hovering over a real bar
+in a real chart produced an actual `.hoverlayer .hovertext` tooltip (`deal_value_usd=0-1999,
+count=1`), and the chart's modebar (zoom/pan/box-select/autoscale/download) was present, which a
+static image can never have.
 
 ## Context Management
 
@@ -122,7 +153,7 @@ A model judging its own output is weaker evidence than an independent judge (it'
 
 ## MCP Server
 
-`mcp_server.py` wraps the whole pipeline as one MCP tool, `analyze_dataset(file_path, question, model, budget_usd)` — pass `question` to get the same goal-directed analysis the app's intent gate provides — so any MCP-aware client — Claude Desktop, Claude Code, another agent — can call it directly, no browser involved. It's a thin adapter: calls `agent.loop.run_analysis()` exactly like `app.py` does, no duplicated pipeline logic. Charts come back as inline image content blocks (most clients render them directly in the conversation), and the narrative + findings as a text block.
+`mcp_server.py` wraps the whole pipeline as one MCP tool, `analyze_dataset(file_path, question, model, budget_usd)` — pass `question` to get the same goal-directed analysis the app's intent gate provides — so any MCP-aware client — Claude Desktop, Claude Code, another agent — can call it directly, no browser involved. It's a thin adapter: calls `agent.loop.run_analysis()` exactly like `app.py` does, no duplicated pipeline logic. Charts come back as inline image content blocks when the optional `kaleido` package is installed (see "Interactive Charts"), or a text note pointing at the interactive HTML file otherwise, and the narrative + findings as a text block.
 
 Test it locally with the SDK's dev inspector:
 ```bash
@@ -237,7 +268,7 @@ auto-analyst/
 ├── app.py                    # Streamlit frontend — plan review, live progress, judge score
 ├── mcp_server.py              # exposes analyze_dataset as an MCP tool
 └── outputs/
-    ├── charts/                # generated chart images
+    ├── charts/                # generated interactive chart files (.html, see "Interactive Charts")
     └── runs/                  # per-run JSONL traces (gitignored — see "Run Tracing")
 ```
 

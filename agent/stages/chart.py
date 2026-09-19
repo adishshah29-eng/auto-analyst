@@ -1,7 +1,13 @@
 """Stage 4: Chart Generation. Chart type is chosen per finding, not from a
 fixed set generated regardless of content — a skewed numeric column gets a
 histogram, a flagged correlation gets a scatter plot, a categorical
-breakdown gets a bar chart, etc."""
+breakdown gets a bar chart, etc.
+
+Charts are Plotly figures, not matplotlib — they render as genuinely
+interactive (hover tooltips, zoom/pan, legend toggling) in the Streamlit
+app, not a static picture. See agent/sandbox.py's chart-collection block
+for how a `charts` list of figure objects becomes saved HTML files, and
+README "Interactive Charts" for the full design."""
 
 from __future__ import annotations
 
@@ -14,18 +20,20 @@ from agent.llm import CostTracker
 from agent.state import AnalysisState, ChartMeta
 from agent.stages.common import SANDBOX_SYSTEM_PREAMBLE, _run_with_retry, format_data_block
 
-_TASK = """{goal_block}Given the findings below, create the matplotlib chart(s) that best communicate them.
+_TASK = """{goal_block}Given the findings below, create the Plotly chart(s) that best communicate them.
 Pick a chart type appropriate to each finding's content — for example:
-- a skewed/notable numeric distribution -> histogram
-- a flagged correlation between two numeric columns -> scatter plot
-- a categorical breakdown or group-by result -> bar chart
-- a time-based finding -> line chart
+- a skewed/notable numeric distribution -> histogram (px.histogram)
+- a flagged correlation between two numeric columns -> scatter plot (px.scatter)
+- a categorical breakdown or group-by result -> bar chart (px.bar)
+- a time-based finding -> line chart (px.line)
 Do not produce a fixed number of charts regardless of content: create one chart per finding that is
 actually chart-worthy (skip findings that don't visualize well), typically 2-4 charts total.
-Call `plt.figure()` before each chart so each is captured separately. Give each chart a title and
-axis labels.
+Build each chart with px (plotly.express) or go (plotly.graph_objects) as a Figure object. Give
+each one a title and axis labels via `fig.update_layout(title=..., xaxis_title=..., yaxis_title=...)`.
+Append each finished figure to a Python list named `charts`, IN THE SAME ORDER you build them —
+this is how figures are captured, there is no separate "show" step.
 
-Build a Python list of dicts named `chart_meta`, one entry per `plt.figure()` you created, IN THE
+Build a second Python list of dicts named `chart_meta`, one entry per figure in `charts`, IN THE
 SAME ORDER, shaped like: {{"chart_type": "histogram"|"scatter"|"bar"|"line"|"box"|"other",
 "question": "<the specific question this chart answers, one sentence>"}}.
 
@@ -71,12 +79,16 @@ def run(state: AnalysisState, df: pd.DataFrame, tracker: CostTracker, model: str
     if not isinstance(chart_meta, list):
         chart_meta = []
 
-    for path, meta in zip(result.chart_paths, chart_meta):
+    def _static_path(i: int) -> str:
+        return result.static_chart_paths[i] if i < len(result.static_chart_paths) else ""
+
+    for i, (path, meta) in enumerate(zip(result.chart_paths, chart_meta)):
         if not isinstance(meta, dict):
             continue
         state["charts_generated"].append(
             ChartMeta(
                 path=path,
+                static_path=_static_path(i),
                 chart_type=str(meta.get("chart_type", "other")),
                 question=str(meta.get("question", "")),
             )
@@ -84,5 +96,7 @@ def run(state: AnalysisState, df: pd.DataFrame, tracker: CostTracker, model: str
     # Charts without matching metadata (LLM produced more figures than
     # descriptions) still get saved to disk but are recorded generically
     # rather than silently dropped.
-    for path in result.chart_paths[len(chart_meta):]:
-        state["charts_generated"].append(ChartMeta(path=path, chart_type="other", question=""))
+    for i in range(len(chart_meta), len(result.chart_paths)):
+        state["charts_generated"].append(
+            ChartMeta(path=result.chart_paths[i], static_path=_static_path(i), chart_type="other", question="")
+        )

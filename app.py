@@ -10,6 +10,7 @@ import tempfile
 import time
 
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 # Must run before any `from agent...` import: agent/llm.py reads
@@ -167,10 +168,19 @@ elif st.session_state.result is not None:
 
     st.markdown("## Charts")
     if state["charts_generated"]:
-        cols = st.columns(2)
-        for i, c in enumerate(state["charts_generated"]):
-            with cols[i % 2]:
-                st.image(c["path"], caption=c["question"] or c["chart_type"])
+        # Each chart is a standalone interactive Plotly HTML document (hover
+        # tooltips, zoom/pan, legend toggling) — embedded via an iframe
+        # component, not st.image(), since there's no static picture to
+        # show here. One per row: an interactive chart needs more room for
+        # its hover/legend/zoom controls to actually be usable than a
+        # 2-column grid of static images did.
+        for c in state["charts_generated"]:
+            st.caption(c["question"] or c["chart_type"])
+            try:
+                with open(c["path"], encoding="utf-8") as f:
+                    components.html(f.read(), height=480, scrolling=False)
+            except OSError:
+                st.warning(f"Chart file missing: `{c['path']}`")
     else:
         st.write("_No charts were generated._")
 

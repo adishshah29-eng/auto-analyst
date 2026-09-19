@@ -22,12 +22,10 @@ from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 from typing import Any
 
-import matplotlib
 import numpy as np
 import pandas as pd
-
-matplotlib.use("Agg")  # headless: never try to open a display
-import matplotlib.pyplot as plt  # noqa: E402
+import plotly.express as px
+import plotly.graph_objects as go
 
 # Overridable via env vars so hosts with unusual constraints can tune
 # without a code change. Defaults now assume a container-limited deploy
@@ -61,7 +59,11 @@ class SandboxResult:
     stdout: str = ""
     error: str | None = None
     output_vars: dict[str, Any] = field(default_factory=dict)
-    chart_paths: list[str] = field(default_factory=list)
+    chart_paths: list[str] = field(default_factory=list)  # interactive standalone .html files
+    # Optional static .png per chart (same order/index as chart_paths), only
+    # populated when the `kaleido` package is installed — see _worker() for
+    # why that's an optional dependency, not a hard one. "" where unavailable.
+    static_chart_paths: list[str] = field(default_factory=list)
 
 
 def _set_resource_limits(memory_limit_mb: int) -> None:
@@ -128,7 +130,8 @@ def _worker(
             "__builtins__": _SAFE_BUILTINS,
             "pd": pd,
             "np": np,
-            "plt": plt,
+            "px": px,
+            "go": go,
             "df": df.copy(deep=True),  # copy-on-inject: generated code can never mutate the caller's df
         }
         namespace.update(extra_context)
@@ -145,12 +148,40 @@ def _worker(
                 except Exception:
                     output_vars[name] = repr(namespace[name])
 
-        for fig_num in plt.get_fignums():
-            fig = plt.figure(fig_num)
-            path = f"{chart_dir}/{chart_prefix}_{fig_num}.png"
-            fig.savefig(path, bbox_inches="tight", dpi=110)
-            chart_paths.append(path)
-        plt.close("all")
+        # Plotly has no global figure registry the way matplotlib's pyplot
+        # does (there was no plt.get_fignums() equivalent to fall back on),
+        # so the chart-building prompt (agent/stages/chart.py) asks the
+        # model to collect its own figures into a plain list named `charts`
+        # — the worker just reads that convention back out of the
+        # namespace, same shape as any other captured variable.
+        static_chart_paths: list[str] = []
+        charts_obj = namespace.get("charts")
+        if isinstance(charts_obj, list):
+            for i, fig in enumerate(charts_obj):
+                if not hasattr(fig, "write_html"):
+                    continue
+                html_path = f"{chart_dir}/{chart_prefix}_{i}.html"
+                try:
+                    fig.write_html(html_path, include_plotlyjs="cdn", full_html=True)
+                    chart_paths.append(html_path)
+                except Exception:
+                    continue
+                # Static PNG export needs the optional `kaleido` package,
+                # which bundles its own renderer — deliberately NOT a hard
+                # dependency (see requirements.txt) since this project
+                # deploys to a ~1GB container where an extra native
+                # dependency is a real memory-budget decision, not a free
+                # one. Runs inside this already-isolated, already
+                # resource-limited child process either way, so a failure
+                # or absence here can never affect the interactive chart
+                # the app actually renders — it only means the MCP server
+                # falls back to a text note instead of a static image.
+                try:
+                    png_path = f"{chart_dir}/{chart_prefix}_{i}.png"
+                    fig.write_image(png_path)
+                    static_chart_paths.append(png_path)
+                except Exception:
+                    static_chart_paths.append("")
 
         result_queue.put(
             {
@@ -159,10 +190,10 @@ def _worker(
                 "error": None,
                 "output_vars": output_vars,
                 "chart_paths": chart_paths,
+                "static_chart_paths": static_chart_paths,
             }
         )
     except Exception:
-        plt.close("all")
         result_queue.put(
             {
                 "success": False,
@@ -170,6 +201,7 @@ def _worker(
                 "error": traceback.format_exc(),
                 "output_vars": {},
                 "chart_paths": [],
+                "static_chart_paths": [],
             }
         )
 
@@ -285,4 +317,5 @@ def run_sandboxed(
         error=raw["error"],
         output_vars=raw["output_vars"],
         chart_paths=raw["chart_paths"],
+        static_chart_paths=raw.get("static_chart_paths", []),
     )

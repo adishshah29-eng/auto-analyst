@@ -113,8 +113,20 @@ def analyze_dataset(
 
     content: list[str | Image] = ["\n".join(lines)]
     for c in state["charts_generated"]:
-        if os.path.exists(c["path"]):
-            content.append(Image(path=c["path"]))
+        # Charts are interactive Plotly HTML in the app (see app.py / README
+        # "Interactive Charts") — an MCP client can't render live JS, so
+        # this path needs an actual raster image. `static_path` is only
+        # populated when the optional `kaleido` package was available at
+        # chart-generation time; when it wasn't, fall back to a text note
+        # rather than silently dropping the chart.
+        if c.get("static_path") and os.path.exists(c["static_path"]):
+            content.append(Image(path=c["static_path"]))
+        elif os.path.exists(c["path"]):
+            content.append(
+                f"_Chart \"{c['question'] or c['chart_type']}\" is interactive-only "
+                f"(install the optional `kaleido` package for a static image here) "
+                f"— saved to `{c['path']}`, open it in a browser to view._"
+            )
 
     return content
 

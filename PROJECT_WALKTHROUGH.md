@@ -16,7 +16,7 @@ columns it contains. Four AI "agents" — each with one job — look at it,
 clean it, figure out what's actually interesting in it, make charts, and
 write you a plain-English summary. A human (you) gets to steer what it looks
 for and approve its plan before any code actually runs. Everything the AI
-writes is real Python (pandas/matplotlib) that executes in a locked-down
+writes is real Python (pandas/Plotly) that executes in a locked-down
 sandbox, not some canned template — which is what lets it work on *any*
 dataset instead of just the one or two shapes a developer tested against.
 
@@ -76,7 +76,7 @@ Significance Gate   (deterministic — flags weak/small-sample findings)
 Critic — Findings   (AI reviews findings, drops junk, never drops a caveat)
    │
    ▼
-Executor — Chart    (writes + runs matplotlib code in the sandbox)
+Executor — Chart    (writes + runs Plotly code in the sandbox)
    │
    ▼
 Synthesizer         (writes the final plain-English narrative)
@@ -160,8 +160,8 @@ policy is enforced in code, not left to the AI's judgment (§9).
 
 **Step 8 — Executor: Chart.** For each surviving finding, the AI picks an
 appropriate chart type (histogram for a skewed distribution, scatter for a
-correlation, bar for a category breakdown) and writes the matplotlib code.
-Charts save as PNGs.
+correlation, bar for a category breakdown) and writes Plotly code. Charts save as standalone
+interactive HTML files (hover tooltips, zoom/pan, legend toggling) — not PNGs. See §5a.
 
 **Step 9 — Synthesizer.** One more AI call, no code execution this time —
 reads only the approved findings and chart descriptions, and writes a
@@ -200,7 +200,7 @@ clean/explore/chart step — runs here, never in the main app process.
    `NameError`/`ImportError` immediately.
 4. A **timeout** (default 15s) and, optionally, a **memory cap** bound the
    child. If it hangs or blows up, the parent kills it.
-5. Whatever the code produced — requested variables, any matplotlib figures,
+5. Whatever the code produced — requested variables, any Plotly figures,
    stdout, or a full traceback on failure — comes back to the main process.
 
 **Why this matters:** the AI is allowed to write *arbitrary* code, which is
@@ -217,6 +217,42 @@ A production-grade version would run this in a real container/VM boundary
 (tools like E2B or Daytona exist for exactly this) with no network egress.
 This is documented as a known, deliberate scope boundary, not something
 quietly ignored.
+
+---
+
+## 5a. Deep dive: Interactive charts (Plotly, not matplotlib)
+
+Charts render like a real BI tool — hover tooltips per data point, zoom/pan, click a legend entry
+to hide a series, a download-as-PNG button — because they're built with **Plotly**, not matplotlib.
+matplotlib can only ever produce a picture: `savefig()` bakes it into pixels, and there's nothing
+left to interact with once it's a PNG. Plotly instead builds a chart as a self-contained interactive
+HTML/JavaScript document, and Streamlit embeds that directly in the browser.
+
+**How it actually flows, mechanically:** the sandbox (§5) exposes `px` (plotly.express) and `go`
+(plotly.graph_objects) to the AI's code instead of `plt`. Plotly has no global "list of open
+figures" the way matplotlib's `pyplot` does, so the AI is asked to build each figure and append it
+to a plain Python list named `charts` — the sandbox worker reads that list back and saves each
+figure as a standalone `.html` file via `fig.write_html(...)`. The Streamlit app then embeds that
+HTML directly (`st.components.v1.html(...)`, an iframe) — never `st.image()`, because there's no
+picture in this path to show.
+
+**The one place this can't fully carry over: MCP.** An MCP client (Claude Desktop, Claude Code)
+can only render text or a static image back to the person using it — it has no way to run live
+JavaScript. So `mcp_server.py` still needs an actual PNG for each chart. That comes from an
+*optional* package called `kaleido`, which bundles its own image-rendering engine — deliberately
+not installed by default, because this project deploys to a real ~1GB container (see §15) where
+every added dependency is a genuine memory-budget decision, not a free one. The sandbox worker
+tries the PNG export right after building each chart anyway (inside the same already-isolated
+subprocess), and just records "no static image" if `kaleido` isn't there; the MCP server sends the
+PNG when one exists, and a plain text note pointing at the interactive file when it doesn't. The
+Streamlit app's charts are completely unaffected either way — this tradeoff is scoped to MCP only.
+
+**Verified live, not just unit-tested:** ran a real model against `leads_deals.csv`, confirmed the
+saved files are genuine Plotly documents (they call `Plotly.newPlot(...)` and load their JS from
+`cdn.plot.ly`), then drove the actual running app with a real browser — hovering over one specific
+bar in a real chart produced an actual live tooltip (`deal_value_usd=0-1999, count=1`), and the
+chart's control bar (zoom, pan, box-select, autoscale, reset, download) was visibly present, which
+is proof this is a live widget: a static image can never have interactive controls.
 
 ---
 
@@ -436,7 +472,7 @@ placeholder).
 
 | Piece | What / Why |
 |---|---|
-| **Python + pandas/numpy/matplotlib** | The actual analysis engine — real code, not a simulation of analysis. |
+| **Python + pandas/numpy/Plotly** | The actual analysis engine — real code, not a simulation of analysis. Plotly (not matplotlib) is what makes charts genuinely interactive — see §5a. |
 | **Anthropic Claude *and* Google Gemini** | One interface (`agent/llm.py`), provider auto-detected from the model name. Built to support both because the free Google AI Studio tier makes this runnable at $0, while Claude is available for higher-quality runs. |
 | **Streamlit** | The web UI — chosen because it's the fastest way to get an interactive, stateful Python app in front of a browser with no separate frontend codebase. |
 | **multiprocessing (`spawn`)** | How the sandbox achieves real process isolation (see §5). |
@@ -469,7 +505,7 @@ agent/
     load_profile.py       # Deterministic schema profiling — no AI.
     clean.py                # Executor: implements the approved cleaning steps.
     explore.py                # Executor: implements the approved analysis steps.
-    chart.py                    # Executor: picks chart types and writes matplotlib.
+    chart.py                    # Executor: picks chart types and writes Plotly (interactive).
     synthesize.py                 # Writes the final plain-English narrative.
 eval/
   generate_datasets.py   # Builds 3 synthetic test datasets (with known, planted
@@ -482,7 +518,7 @@ app.py                      # The Streamlit UI.
 mcp_server.py                 # MCP tool wrapper around the same pipeline.
 .github/workflows/tests.yml     # CI — runs tests/ on every push/PR.
 outputs/
-  charts/                        # Generated chart PNGs (gitignored).
+  charts/                        # Generated interactive chart .html files (gitignored).
   runs/                            # Per-run trace files (gitignored).
 ```
 
@@ -627,6 +663,14 @@ handful of concurrent users.
 Either — Anthropic Claude or Google Gemini, picked by whichever API key
 you provide. The live demo defaults to Gemini's free tier so it costs $0 to
 run.
+
+**"Are the charts interactive, like Power BI?"**
+Yes — Plotly, not matplotlib. Hover a data point for a tooltip, zoom/pan,
+click a legend entry to toggle a series, download as PNG. The one
+exception is calling this through MCP (Claude Desktop, etc.) instead of
+the browser app — that client can only show a static image, so it needs
+an optional extra package (`kaleido`) to get a picture at all, and doesn't
+get the interactivity either way. See §5a.
 
 ---
 
